@@ -43,16 +43,25 @@ RELEASES_PAGE = f"https://github.com/{GITHUB_OWNER}/{GITHUB_REPO}/releases"
 
 
 def _parse_version(text: str) -> tuple[int, ...]:
-    """Extract a comparable numeric version tuple from arbitrary tag text.
+    """Extract a comparable FD6 app version (X.Y.Z) from arbitrary tag/name text.
 
-    Handles tags like 'v0.5.1', '0.5.1', 'Multi-Support-v3456-0.5.1' — we grab
-    the LAST dotted-number group so prefixes/build ids don't confuse the compare.
-    Returns () when nothing numeric is found (treated as "older than anything").
+    CRITICAL: only THREE-component dotted numbers count as a version. FD6
+    versions are X.Y.Z (e.g. 0.5.3, 0.4.7). FH6 *build numbers* like 354.221 /
+    364.933 are TWO components and must NEVER be read as a version — an old
+    release tagged `v354.221` parsed as (354, 221) once outranked (0, 5, 3) and
+    auto-updated everyone DOWN to the original build. Requiring 3 components
+    rejects those build numbers outright. When several 3-component groups exist
+    (e.g. a name with both "0.5.3" and a "Build 1.2.3"), we take the SMALLEST
+    major group, since the app version is the low-major one (0.x today).
+    Returns () when no 3-component version is present (treated as "no version").
     """
-    matches = re.findall(r"\d+(?:\.\d+)+", text or "")
-    if not matches:
+    groups = re.findall(r"\d+\.\d+\.\d+", text or "")
+    if not groups:
         return ()
-    return tuple(int(p) for p in matches[-1].split("."))
+    parsed = [tuple(int(p) for p in g.split(".")) for g in groups]
+    # Prefer the lowest-major group (the app version), tie-break by highest value.
+    parsed.sort(key=lambda v: (v[0], [-x for x in v]))
+    return parsed[0]
 
 
 def _is_newer(latest: str, current: str) -> bool:

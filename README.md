@@ -27,7 +27,7 @@
 ## Install
 
 1. Download `FD6.exe` from [Releases](https://github.com/tokyubevoxelverse/ForzaDesigner6/releases).
-2. Double-click — no installer, no admin rights. Windows SmartScreen → "More info" → "Run anyway".
+2. Double-click — no installer, use admin rights. Windows SmartScreen → "More info" → "Run anyway".
 
 Source build: Python 3.10+, `pip install -r requirements.txt`. Microsoft Visual C++ Redistributable is normally already installed; if FD6 fails to launch, grab it [here](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
@@ -109,9 +109,10 @@ ACC export does not require ACC to be running and does not touch ACC's process m
 - **Do** open the game's vinyl editor *before* clicking Inject.
 - **Do** keep one or two sphere templates saved for fast re-use.
 - **Do** wait for the green status — large-game scans can take minutes.
+- **Do** run FD6 as admin.
 - **Don't** edit, add, delete, or move shapes in-game during an active injection.
 - **Don't** click anything in FD6 during the RTTI fallback phase. Windows may label it "Not Responding"; it isn't — let it finish.
-- **Don't** close the game mid-injection or run FD6 as admin.
+- **Don't** close the game mid-injection.
 
 ---
 

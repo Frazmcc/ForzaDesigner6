@@ -27,7 +27,7 @@
 ## Install
 
 1. Download `FD6.exe` from [Releases](https://github.com/tokyubevoxelverse/ForzaDesigner6/releases).
-2. Double-click — no installer, use admin rights. Windows SmartScreen → "More info" → "Run anyway".
+2. Double-click to run — no installer needed. Windows SmartScreen → "More info" → "Run anyway". If injection fails, right-click → **Run as administrator** (and run the game elevated too).
 
 Source build: Python 3.10+, `pip install -r requirements.txt`. Microsoft Visual C++ Redistributable is normally already installed; if FD6 fails to launch, grab it [here](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
@@ -107,9 +107,15 @@ ACC export does not require ACC to be running and does not touch ACC's process m
 ## ✅ Do / ❌ Don't
 
 - **Do** open the game's vinyl editor *before* clicking Inject.
+- **Do** ungroup your sphere-template vinyl group before injecting — the
+  locator finds the individual layers, not a grouped object.
 - **Do** keep one or two sphere templates saved for fast re-use.
 - **Do** wait for the green status — large-game scans can take minutes.
-- **Do** run FD6 as admin.
+- **Do** run **both Forza and FD6 as administrator** if injection fails — FD6
+  needs matching privileges to read and write the game's memory, and elevating
+  both resolves most "can't attach" / failed-injection cases.
+- **Do** check out the built-in banner buttons in the app — including the
+  latest **YouTube tutorial** — for walkthroughs and community links.
 - **Don't** edit, add, delete, or move shapes in-game during an active injection.
 - **Don't** click anything in FD6 during the RTTI fallback phase. Windows may label it "Not Responding"; it isn't — let it finish.
 - **Don't** close the game mid-injection.
@@ -124,6 +130,7 @@ ACC export does not require ACC to be running and does not touch ACC's process m
 | "No confident match" error | Vinyl editor not open, or template doesn't have enough spheres for the JSON's shape count. Load a bigger template. |
 | Re-injection scan looks stalled | RTTI fallback phase can run silently for 2–5 min on a large game. The dialog resumes once a candidate is located. |
 | Shapes offset or wrong scale | File an issue with the JSON, the source image, and a screenshot of the in-game result. |
+| Injection fails / can't attach to the game | Run **both Forza and FD6 as administrator** (right-click → Run as administrator). FD6 needs matching privileges to access the game's memory; this resolves most attach/injection failures. |
 | Game patched, all candidates rejected | The per-game struct offset may have shifted. You can re-probe with `python -m fd6.inject` and drop the corrected offsets into a local `.fd6_offsets.json` (see `fd6_offsets.example.json`) to fix it without rebuilding — or open an issue so the profile in `fd6/inject/game_profiles.py` can be updated. |
 
 ---

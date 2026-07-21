@@ -3,6 +3,11 @@
 Loops 3 OpenSource MP3 tracks at a configurable volume. Controlled via the
 View menu (play/pause, mute, next, volume slider). State (volume, muted, paused)
 persists via QSettings across launches.
+
+Audio is MUTED by default (v0.5.5) — the splash video and music both start
+silent until the user unmutes via View > Music. A one-time migration also
+mutes pre-0.5.5 installs whose saved state predates the muted default; after
+that the user's own choice always wins.
 """
 
 from __future__ import annotations
@@ -18,7 +23,39 @@ from PySide6.QtMultimedia import QAudioOutput, QMediaPlayer
 TRACKS = ["Song1OpenSource.mp3", "Song2OpenSource.mp3", "Song3OpenSource.mp3"]
 
 DEFAULT_VOLUME = 0.30          # 0.0 - 1.0
+DEFAULT_MUTED = True           # v0.5.5: audio starts MUTED; enable via View > Music
 SETTINGS_GROUP = "music"
+# One-time flag: force-mutes users who installed before muted-by-default existed,
+# then never overrides their choice again.
+MUTE_MIGRATION_KEY = "mute_default_applied"
+
+
+def startup_audio_state(settings: QSettings | None = None) -> tuple[bool, float]:
+    """Return (muted, volume) to use at app startup, applying the one-time
+    'muted by default' migration.
+
+    Pre-0.5.5 installs persisted muted=False, so changing the default alone
+    would not silence them. The first launch after this version force-mutes
+    once and sets MUTE_MIGRATION_KEY; after that the user's own mute/unmute
+    choice always wins. Both the splash video and the music player must call
+    this (or read the same keys) so no audio path can blast at startup.
+    """
+    if settings is None:
+        settings = QSettings("FD6", "ForzaDesigner6")
+    settings.beginGroup(SETTINGS_GROUP)
+    try:
+        volume = float(settings.value("volume", DEFAULT_VOLUME))
+    except (TypeError, ValueError):
+        volume = DEFAULT_VOLUME
+    volume = max(0.0, min(1.0, volume))
+    muted = settings.value("muted", DEFAULT_MUTED, type=bool)
+    if not settings.value(MUTE_MIGRATION_KEY, False, type=bool):
+        muted = True
+        settings.setValue("muted", True)
+        settings.setValue(MUTE_MIGRATION_KEY, True)
+    settings.endGroup()
+    settings.sync()
+    return muted, volume
 
 
 def _bundle_root() -> Path:
@@ -50,9 +87,11 @@ class MusicPlayer(QObject):
         self._player.setAudioOutput(self._audio)
         self._player.mediaStatusChanged.connect(self._on_media_status)
 
-        # Load persisted state
-        self._volume = float(self._settings.value("volume", DEFAULT_VOLUME))
-        self._muted = self._settings.value("muted", False, type=bool)
+        self._settings.endGroup()
+        # Load persisted state. startup_audio_state() also applies the one-time
+        # muted-by-default migration for pre-0.5.5 installs.
+        self._muted, self._volume = startup_audio_state(self._settings)
+        self._settings.beginGroup(SETTINGS_GROUP)
         self._was_playing = self._settings.value("playing", True, type=bool)
         self._index = int(self._settings.value("index", 0))
         self._settings.endGroup()

@@ -446,7 +446,8 @@ class MainWindow(QMainWindow):
             self._theme_group.addAction(act)
             theme_menu.addAction(act)
 
-        # --- Music submenu (3 looping OpenSource tracks, 0.3 vol default) ----
+        # --- Music submenu (3 looping OpenSource tracks; MUTED by default, ----
+        # --- 0.3 vol once unmuted) -------------------------------------------
         view_menu.addSeparator()
         music_menu = view_menu.addMenu("&Music")
         self._music_play_act = QAction("&Play / Pause", self, checkable=True)
@@ -806,14 +807,22 @@ class MainWindow(QMainWindow):
         QMessageBox.about(
             self,
             "About Forza Designer 6+",
-            f"<b>Forza Designer 6+</b><br>v0.5.4<br>"
+            f"<b>Forza Designer 6+</b><br>v{fd6.__version__}<br>"
             f"<i>For Forza Horizon 3 / 4 / 5 / 6 (FH6 build {FH6_TARGET_BUILD}) "
             f"and Assetto Corsa Competizione</i><br><br>"
             "Multi-game livery suite. Forza titles: live memory injection of "
             "vinyl-group shapes (position, scale, rotation, color). Assetto "
             "Corsa Competizione: file-based PNG livery export to the user's "
             "Documents folder.<br><br>"
-            "<b>What's new in v0.5.4 (critical updater fix):</b><br>"
+            "<b>What's new in v0.5.5 (audio muted by default):</b><br>"
+            "• FD6 now starts <b>completely silent</b> — the splash video no "
+            "longer blasts at full volume (it used to ignore every audio "
+            "setting), and the background music starts muted for everyone, "
+            "including existing installs.<br>"
+            "• Want the tunes back? <b>View &gt; Music &gt; Mute</b> to unmute "
+            "(Ctrl+M toggles play/pause) — your choice is remembered, and the "
+            "splash now follows your music volume instead of 100%.<br><br>"
+            "<b>v0.5.4 (critical updater fix):</b><br>"
             "• Fixed a serious bug where the updater treated an old FH6 "
             "<i>build-number</i> release tag (<code>v354.221</code>) as app "
             "version <code>354.221</code> — higher than <code>0.5.3</code> — and "

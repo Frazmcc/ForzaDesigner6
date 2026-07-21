@@ -80,6 +80,15 @@ class SplashWindow(QWidget):
 
         self.player = QMediaPlayer(self)
         self.audio = QAudioOutput(self)
+        # The splash used to play at QAudioOutput's default 100% volume no
+        # matter what — the "ear-deafening on launch" complaint. Follow the
+        # same persisted audio state as the background music: muted by default
+        # (users enable sound via View > Music), and never louder than the
+        # user's chosen music volume.
+        from fd6.gui.music import startup_audio_state
+        muted, volume = startup_audio_state()
+        self.audio.setVolume(volume)
+        self.audio.setMuted(muted)
         self.player.setAudioOutput(self.audio)
         self.player.setVideoOutput(self.video)
         self.player.mediaStatusChanged.connect(self._on_status)

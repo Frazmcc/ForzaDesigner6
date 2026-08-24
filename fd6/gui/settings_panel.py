@@ -4,23 +4,35 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
-    QCheckBox, QComboBox, QFormLayout, QGroupBox, QHBoxLayout, QLabel,
-    QPushButton, QSpinBox, QVBoxLayout, QWidget
+    QCheckBox,
+    QComboBox,
+    QFormLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
 )
 
-from fd6.shapegen.profile import Profile, load_profile_from_file, list_bundled_profiles
+from fd6.shapegen.profile import (
+    Profile,
+    load_profile_from_file,
+    list_bundled_profiles,
+)
 
 
 SHAPE_TYPE_CHOICES = [
-    ("rotated_ellipse", "Rotated Ellipse (default)"),
-    ("rectangle", "Rectangle (coming soon)"),
-    ("rotated_rectangle", "Rotated Rectangle (coming soon)"),
-    ("ellipse", "Ellipse (coming soon)"),
-    ("circle", "Circle (coming soon)"),
-    ("triangle", "Triangle (coming soon)"),
+    ("rotated_ellipse", "Rotated Ellipse"),
+    ("rectangle", "Rectangle"),
+    ("rotated_rectangle", "Rotated Rectangle"),
+    ("ellipse", "Ellipse"),
+    ("circle", "Circle"),
+    ("triangle", "Triangle"),
 ]
 
-# Compute backend choices for the shape search. GPU uses OpenCL (cross-vendor).
+
 COMPUTE_BACKEND_CHOICES = [
     ("auto", "Auto (GPU if ready)"),
     ("cpu", "CPU"),
@@ -29,9 +41,13 @@ COMPUTE_BACKEND_CHOICES = [
 
 
 class SettingsPanel(QWidget):
-    """Profile picker + advanced knobs. Emits profile_changed when the user edits anything."""
+    """
+    Profile picker and generation settings.
 
-    profile_changed = Signal(object)  # Profile
+    logo_ultra is selected automatically at startup when the profile exists.
+    """
+
+    profile_changed = Signal(object)
     start_clicked = Signal()
     pause_clicked = Signal()
     stop_clicked = Signal()
@@ -39,105 +55,139 @@ class SettingsPanel(QWidget):
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
 
-        # Profile picker
+        # ------------------------------------------------------------
+        # Profile
+        # ------------------------------------------------------------
+
         prof_row = QHBoxLayout()
+
         prof_label = QLabel("Profile:")
         prof_label.setToolTip(
-            "A profile is a saved bundle of all the settings below. Pick one to "
-            "fill the values automatically — for example, '_default' uses 3000 "
-            "shapes at 1200 px which is a good general-purpose starting point. "
-            "Adjust any setting after selecting a profile and your changes stay "
-            "for this session."
+            "A profile is a saved collection of generation settings."
         )
+
         prof_row.addWidget(prof_label)
+
         self.profile_combo = QComboBox(self)
         self.profile_combo.setToolTip(prof_label.toolTip())
+
         self._populate_profiles()
-        self.profile_combo.currentIndexChanged.connect(self._on_profile_changed)
+
+        self.profile_combo.currentIndexChanged.connect(
+            self._on_profile_changed
+        )
+
         prof_row.addWidget(self.profile_combo, stretch=1)
+
         layout.addLayout(prof_row)
 
-        # Compute backend picker (chosen before generation). GPU = CuPy/CUDA.
+        # ------------------------------------------------------------
+        # Compute backend
+        # ------------------------------------------------------------
+
         compute_row = QHBoxLayout()
+
         compute_label = QLabel("Compute:")
+
         compute_tip = (
             "Which processor runs the shape search.\n\n"
-            "Auto: use the GPU if its runtime is already set up, otherwise CPU "
-            "(never downloads anything on its own).\n"
-            "CPU: always use the multi-core CPU path (works on every machine).\n"
-            "GPU (OpenCL): use ANY OpenCL GPU — NVIDIA, AMD, or Intel — through "
-            "your graphics driver. The first time you pick GPU, FD6 downloads a "
-            "small GPU runtime once (~tens of MB) so the app itself stays lean; "
-            "keep your GPU drivers up to date. If no GPU is usable it falls back "
-            "to CPU automatically.\n\n"
-            "GPU acceleration applies to the default Rotated Ellipse shape."
+            "Auto: use GPU when supported, otherwise CPU.\n"
+            "CPU: always use the CPU generation path.\n"
+            "GPU: use the OpenCL GPU path when available.\n\n"
+            "Mixed logo shapes such as rectangles and triangles may require "
+            "the CPU generation path."
         )
+
         compute_label.setToolTip(compute_tip)
+
         compute_row.addWidget(compute_label)
+
         self.compute_backend = QComboBox(self)
+
         for code, label in COMPUTE_BACKEND_CHOICES:
             self.compute_backend.addItem(label, code)
-        self.compute_backend.setCurrentIndex(0)  # Auto
+
+        self.compute_backend.setCurrentIndex(0)
         self.compute_backend.setToolTip(compute_tip)
-        self.compute_backend.currentIndexChanged.connect(self._on_adv_changed)
-        compute_row.addWidget(self.compute_backend, stretch=1)
+
+        self.compute_backend.currentIndexChanged.connect(
+            self._on_adv_changed
+        )
+
+        compute_row.addWidget(
+            self.compute_backend,
+            stretch=1,
+        )
+
         layout.addLayout(compute_row)
 
-        # Advanced group — every spinbox gets a plain-language tooltip so
-        # non-technical users can hover and know what each number does.
+        # ------------------------------------------------------------
+        # Advanced generation settings
+        # ------------------------------------------------------------
+
         adv = QGroupBox("Advanced", self)
         form = QFormLayout(adv)
-        self.stop_at = QSpinBox(); self.stop_at.setRange(10, 50000); self.stop_at.setValue(3000)
+
+        self.stop_at = QSpinBox()
+        self.stop_at.setRange(10, 50000)
+        self.stop_at.setValue(3000)
+
         self.stop_at.setToolTip(
-            "How many shapes to generate before stopping. Set this to match the "
-            "number of layers in your open Forza vinyl group (typical sphere "
-            "templates have 500, 1500, or 3000 layers). If this number is "
-            "larger than your template's layer count, the injection will fail "
-            "because there aren't enough slots."
+            "Maximum number of shapes generated. "
+            "For Forza vinyl groups, 3000 is normally the maximum useful "
+            "high-quality target."
         )
-        self.random_samples = QSpinBox(); self.random_samples.setRange(10, 50000); self.random_samples.setValue(1000)
+
+        self.random_samples = QSpinBox()
+        self.random_samples.setRange(10, 50000)
+        self.random_samples.setValue(20000)
+
         self.random_samples.setToolTip(
-            "Per shape: how many random candidate shapes the generator tries "
-            "before picking the best one. Higher = better quality but slower. "
-            "1000 is a good default; drop to 500 for a fast preview, raise to "
-            "2000+ for a final pass on a picky source image."
-        )
-        self.mutated_samples = QSpinBox(); self.mutated_samples.setRange(1, 5000); self.mutated_samples.setValue(200)
-        self.mutated_samples.setToolTip(
-            "After the random search picks a winner, how many small tweaks to "
-            "try in order to refine it. Higher = each shape is positioned more "
-            "precisely but generation is slower. 200 is a good default."
-        )
-        self.max_resolution = QSpinBox(); self.max_resolution.setRange(100, 8192); self.max_resolution.setValue(1200)
-        self.max_resolution.setToolTip(
-            "The biggest the image will be processed at, in pixels along the "
-            "longer side. Higher = more accurate shape placement but uses way "
-            "more memory and time. 1200 px is the sweet spot for most images. "
-            "Push to 2048 / 4096 / 8192 only if the source is highly detailed — "
-            "8K-class targets need at least 32 GB of RAM and noticeably extend "
+            "How many random candidate shapes are tested for each generated "
+            "shape. Higher values improve the search but greatly increase "
             "generation time."
         )
-        self.max_threads = QSpinBox(); self.max_threads.setRange(0, 64); self.max_threads.setValue(0)
+
+        self.mutated_samples = QSpinBox()
+        self.mutated_samples.setRange(1, 20000)
+        self.mutated_samples.setValue(4000)
+
+        self.mutated_samples.setToolTip(
+            "How many refined mutations are tested after selecting a promising "
+            "candidate shape."
+        )
+
+        self.max_resolution = QSpinBox()
+        self.max_resolution.setRange(100, 8192)
+        self.max_resolution.setValue(2048)
+
+        self.max_resolution.setToolTip(
+            "Maximum processing resolution on the longest side. "
+            "2048 is recommended for the Logo Ultra profile."
+        )
+
+        self.max_threads = QSpinBox()
+        self.max_threads.setRange(0, 128)
+        self.max_threads.setValue(0)
+
         self.max_threads.setToolTip(
-            "How many CPU cores the generator uses in parallel. Leave at 0 to "
-            "let FD6 auto-pick a safe number based on your CPU and RAM. Only "
-            "override this if you want to free up cores for something else "
-            "while generation runs (e.g. set it to half your core count)."
+            "Maximum CPU thread count. "
+            "0 allows FD6 to choose automatically."
         )
-        self.preview_every = QSpinBox(); self.preview_every.setRange(1, 100); self.preview_every.setValue(1)
+
+        self.preview_every = QSpinBox()
+        self.preview_every.setRange(1, 500)
+        self.preview_every.setValue(25)
+
         self.preview_every.setToolTip(
-            "How often to refresh the live preview pane during generation. "
-            "1 = redraw after every shape (smoothest, slight CPU cost). "
-            "10 = redraw every 10 shapes (faster, choppier). Doesn't affect "
-            "the final result, only what you see while it's running."
+            "How often FD6 refreshes the live preview. "
+            "This does not affect final generation quality."
         )
-        # QFormLayout auto-creates QLabel widgets for the left column. Those
-        # labels do NOT inherit tooltips from their paired field, so hovering
-        # the text "Stop at shapes" would show nothing. Create the labels
-        # explicitly and mirror each field's tooltip onto its label.
+
         for label_text, field in (
             ("Stop at shapes", self.stop_at),
             ("Random samples", self.random_samples),
@@ -148,246 +198,560 @@ class SettingsPanel(QWidget):
         ):
             row_label = QLabel(label_text, adv)
             row_label.setToolTip(field.toolTip())
-            form.addRow(row_label, field)
-            field.valueChanged.connect(self._on_adv_changed)
+
+            form.addRow(
+                row_label,
+                field,
+            )
+
+            field.valueChanged.connect(
+                self._on_adv_changed
+            )
+
         layout.addWidget(adv)
 
-        # Sticker mode toggle
-        sticker_group = QGroupBox("Image options", self)
-        sticker_group.setToolTip(
-            "How FD6 should handle source images. Affects only PNGs with "
-            "transparency — regular JPEG / PNG without alpha use the same "
-            "code path either way."
+        # ------------------------------------------------------------
+        # Image options
+        # ------------------------------------------------------------
+
+        sticker_group = QGroupBox(
+            "Image options",
+            self,
         )
-        sg_layout = QVBoxLayout(sticker_group)
-        self.sticker_mode_cb = QCheckBox("Add white background to transparent images", sticker_group)
-        self.sticker_mode_cb.setChecked(True)  # ON = current default behavior (composite onto white)
+
+        sg_layout = QVBoxLayout(
+            sticker_group
+        )
+
+        self.sticker_mode_cb = QCheckBox(
+            "Add white background to transparent images",
+            sticker_group,
+        )
+
+        self.sticker_mode_cb.setChecked(True)
+
         self.sticker_mode_cb.setToolTip(
-            "ON (default, recommended): see-through areas of a PNG get filled with "
-            "white before generation. Use this for normal images.\n\n"
-            "OFF (sticker mode): see-through areas stay see-through and shapes "
-            "are only placed inside the visible part of the image. Use this for "
-            "logos / stickers where you want the background of the vinyl to "
-            "stay empty (the rest of the Forza vinyl group shows through)."
+            "ON: transparent image areas become white.\n\n"
+            "OFF: transparent areas remain transparent. "
+            "This is normally preferable for isolated logos and stickers."
         )
-        sg_layout.addWidget(self.sticker_mode_cb)
 
-        # Experimental: cap generation resolution at 2048px. Users report better
-        # quality at/under 2048, so this hard-limits Max resolution to 2048 no
-        # matter what the profile (even extreme_quality) or the spinbox asks for.
-        # When OFF, Max resolution works at whatever the user sets.
-        self.cap_2048_cb = QCheckBox("Experimental: cap generation at 2048px", sticker_group)
-        self.cap_2048_cb.setChecked(False)
+        self.sticker_mode_cb.toggled.connect(
+            self._on_adv_changed
+        )
+
+        sg_layout.addWidget(
+            self.sticker_mode_cb
+        )
+
+        self.cap_2048_cb = QCheckBox(
+            "Experimental: cap generation at 2048px",
+            sticker_group,
+        )
+
+        # Enabled by default for the high-quality logo configuration.
+        self.cap_2048_cb.setChecked(True)
+
         self.cap_2048_cb.setToolTip(
-            "EXPERIMENTAL. When ON, generation resolution is hard-capped at "
-            "2048 px on the longer side — even if a profile (e.g. extreme_quality) "
-            "or the Max resolution box requests more. Many users report better, "
-            "cleaner results at or below 2048 px. Turn OFF to let Max resolution "
-            "go as high as you set it."
+            "When enabled, FD6 never processes the source above 2048px "
+            "on its longest side."
         )
-        self.cap_2048_cb.toggled.connect(self._on_adv_changed)
-        sg_layout.addWidget(self.cap_2048_cb)
-        layout.addWidget(sticker_group)
 
-        # Shape types. Only rotated_ellipse is confirmed-working for the current
-        # FH6 build; remaining primitives are disabled pending further work.
-        supported_codes = {"rotated_ellipse"}
+        self.cap_2048_cb.toggled.connect(
+            self._on_adv_changed
+        )
+
+        sg_layout.addWidget(
+            self.cap_2048_cb
+        )
+
+        layout.addWidget(
+            sticker_group
+        )
+
+        # ------------------------------------------------------------
+        # Shape types
+        # ------------------------------------------------------------
+
+        supported_codes = {
+            "rotated_ellipse",
+            "rectangle",
+            "rotated_rectangle",
+            "ellipse",
+            "circle",
+            "triangle",
+        }
+
         supported_tooltips = {
             "rotated_ellipse": (
-                "An oval that can be rotated to any angle. Fits organic / "
-                "curvy content (faces, smoke, foliage) best."
+                "Rotatable oval. Good for curves, rounded graphics, "
+                "faces and organic artwork."
+            ),
+            "rectangle": (
+                "Axis-aligned rectangle. Useful for horizontal and vertical "
+                "logo elements."
+            ),
+            "rotated_rectangle": (
+                "Rotatable rectangle. Excellent for lettering, sharp edges, "
+                "stripes and geometric graphics."
+            ),
+            "ellipse": (
+                "Non-rotated ellipse."
+            ),
+            "circle": (
+                "Circle primitive."
+            ),
+            "triangle": (
+                "Triangle primitive. Useful for sharp corners, angular "
+                "letters and geometric logos."
             ),
         }
-        types_group = QGroupBox("Shape types", self)
+
+        types_group = QGroupBox(
+            "Shape types",
+            self,
+        )
+
         types_group.setToolTip(
-            "Which shapes the generator is allowed to use. When more than one "
-            "is checked, FD6 rotates between them so each enabled type gets "
-            "dedicated shape slots in the output."
+            "Choose which primitive shapes FD6 may use while recreating "
+            "the source image."
         )
-        tg_layout = QVBoxLayout(types_group)
+
+        tg_layout = QVBoxLayout(
+            types_group
+        )
+
         self._shape_checks: dict[str, QCheckBox] = {}
-        generic_unsupported = "Not currently supported - planned for a future implementation"
+
         for code, label in SHAPE_TYPE_CHOICES:
-            cb = QCheckBox(label, types_group)
-            cb.setChecked(code == "rotated_ellipse")
-            if code in supported_codes:
-                cb.setToolTip(supported_tooltips.get(code, ""))
-            else:
-                cb.setEnabled(False)
-                cb.setToolTip(generic_unsupported)
-            cb.stateChanged.connect(self._on_adv_changed)
+            cb = QCheckBox(
+                label,
+                types_group,
+            )
+
+            cb.setEnabled(
+                code in supported_codes
+            )
+
+            cb.setChecked(
+                code in {
+                    "rotated_ellipse",
+                    "rotated_rectangle",
+                    "triangle",
+                }
+            )
+
+            cb.setToolTip(
+                supported_tooltips.get(
+                    code,
+                    "",
+                )
+            )
+
+            cb.stateChanged.connect(
+                self._on_adv_changed
+            )
+
             tg_layout.addWidget(cb)
+
             self._shape_checks[code] = cb
-        layout.addWidget(types_group)
 
-        # Action buttons
+        layout.addWidget(
+            types_group
+        )
+
+        # ------------------------------------------------------------
+        # Generation buttons
+        # ------------------------------------------------------------
+
         btn_row = QHBoxLayout()
-        self.start_btn = QPushButton("Start"); self.start_btn.setMinimumHeight(36)
+
+        self.start_btn = QPushButton("Start")
+        self.start_btn.setMinimumHeight(36)
+
         self.start_btn.setToolTip(
-            "Begin shape generation on the next image in the queue using the "
-            "settings above. The preview pane shows the result building up "
-            "shape-by-shape. You can press Pause to hold and Stop to abandon."
+            "Begin generating the image."
         )
-        self.pause_btn = QPushButton("Pause"); self.pause_btn.setCheckable(True); self.pause_btn.setEnabled(False)
+
+        self.pause_btn = QPushButton("Pause")
+        self.pause_btn.setCheckable(True)
+        self.pause_btn.setEnabled(False)
+
         self.pause_btn.setToolTip(
-            "Temporarily pause generation. Click again to resume from where it "
-            "left off — no shapes are lost."
+            "Pause or resume generation."
         )
-        self.stop_btn = QPushButton("Stop"); self.stop_btn.setEnabled(False)
+
+        self.stop_btn = QPushButton("Stop")
+        self.stop_btn.setEnabled(False)
+
         self.stop_btn.setToolTip(
-            "Stop generation early. The shapes generated so far are kept and "
-            "saved to JSON — you can still inject the partial result."
+            "Stop generation early."
         )
-        self.start_btn.clicked.connect(self.start_clicked.emit)
-        self.pause_btn.clicked.connect(self.pause_clicked.emit)
-        self.stop_btn.clicked.connect(self.stop_clicked.emit)
-        btn_row.addWidget(self.start_btn)
-        btn_row.addWidget(self.pause_btn)
-        btn_row.addWidget(self.stop_btn)
-        layout.addLayout(btn_row)
 
-        # Target game picker — FH6 is the validated default. FH5/FH4 are beta.
+        self.start_btn.clicked.connect(
+            self.start_clicked.emit
+        )
+
+        self.pause_btn.clicked.connect(
+            self.pause_clicked.emit
+        )
+
+        self.stop_btn.clicked.connect(
+            self.stop_clicked.emit
+        )
+
+        btn_row.addWidget(
+            self.start_btn
+        )
+
+        btn_row.addWidget(
+            self.pause_btn
+        )
+
+        btn_row.addWidget(
+            self.stop_btn
+        )
+
+        layout.addLayout(
+            btn_row
+        )
+
+        # ------------------------------------------------------------
+        # Target game
+        # ------------------------------------------------------------
+
         from fd6.inject.game_profiles import list_profiles
-        target_row = QHBoxLayout()
-        target_label = QLabel("Target:")
-        target_label.setToolTip(
-            "Which Forza title to inject into. FH6 is fully validated. "
-            "FH5 / FH4 / FH3 use the same memory layout per public research but have "
-            "not been independently verified — test on a throwaway vinyl group first."
-        )
-        target_row.addWidget(target_label)
-        self.target_combo = QComboBox(self)
-        self._target_profiles = list_profiles()
-        for prof in self._target_profiles:
-            self.target_combo.addItem(prof.label, prof.key)
-        self.target_combo.setCurrentIndex(0)  # FH6 by default
-        self.target_combo.setToolTip(
-            "Which Forza title to inject into. FH6 is fully validated. "
-            "FH5 / FH4 use the same memory layout per public research but have "
-            "not been independently verified — test on a throwaway vinyl group first."
-        )
-        self.target_combo.currentIndexChanged.connect(self._on_target_changed)
-        target_row.addWidget(self.target_combo, stretch=1)
-        layout.addLayout(target_row)
 
-        # Inject button — label updates with target selection
-        self.inject_btn = QPushButton("Inject into Forza Horizon 6")
-        self.inject_btn.setEnabled(False)
-        self.inject_btn.setToolTip(
-            "Push the most-recent generated/loaded shapes JSON into the selected Forza title's "
-            "active vinyl group. Make sure the in-game vinyl editor is open with a fresh "
-            "sphere-template group before clicking."
+        target_row = QHBoxLayout()
+
+        target_label = QLabel("Target:")
+
+        target_label.setToolTip(
+            "Select the Forza title that should receive the generated vinyl."
         )
-        self.inject_btn.clicked.connect(self.inject_clicked.emit)
-        layout.addWidget(self.inject_btn)
+
+        target_row.addWidget(
+            target_label
+        )
+
+        self.target_combo = QComboBox(self)
+
+        self._target_profiles = list_profiles()
+
+        for prof in self._target_profiles:
+            self.target_combo.addItem(
+                prof.label,
+                prof.key,
+            )
+
+        # FH6 remains the default target.
+        self.target_combo.setCurrentIndex(0)
+
+        self.target_combo.setToolTip(
+            "Forza Horizon 6 is the primary validated target."
+        )
+
+        self.target_combo.currentIndexChanged.connect(
+            self._on_target_changed
+        )
+
+        target_row.addWidget(
+            self.target_combo,
+            stretch=1,
+        )
+
+        layout.addLayout(
+            target_row
+        )
+
+        # ------------------------------------------------------------
+        # Injection button
+        # ------------------------------------------------------------
+
+        self.inject_btn = QPushButton(
+            "Inject into Forza Horizon 6"
+        )
+
+        self.inject_btn.setEnabled(False)
+
+        self.inject_btn.setToolTip(
+            "Inject the most recently generated or loaded shape JSON "
+            "into the currently open Forza vinyl group."
+        )
+
+        self.inject_btn.clicked.connect(
+            self.inject_clicked.emit
+        )
+
+        layout.addWidget(
+            self.inject_btn
+        )
 
         layout.addStretch()
 
-        # Apply initial profile
-        self._on_profile_changed(self.profile_combo.currentIndex())
+        # Load selected/default profile into controls.
+        self._on_profile_changed(
+            self.profile_combo.currentIndex()
+        )
+
+    # ------------------------------------------------------------
+    # Target
+    # ------------------------------------------------------------
 
     def selected_target_profile_key(self) -> str:
-        """Return the key ('fh6'/'fh5'/'fh4') of the currently picked injection target."""
         data = self.target_combo.currentData()
+
         return str(data) if data else "fh6"
 
     def _on_target_changed(self, idx: int) -> None:
         if idx < 0 or idx >= len(self._target_profiles):
             return
+
         prof = self._target_profiles[idx]
-        # Strip the "(BETA)" suffix for the button label so it stays clean.
-        clean_label = prof.label.replace(" (BETA)", "")
-        self.inject_btn.setText(f"Inject into {clean_label}")
+
+        clean_label = prof.label.replace(
+            " (BETA)",
+            "",
+        )
+
+        self.inject_btn.setText(
+            f"Inject into {clean_label}"
+        )
+
         if prof.beta:
             tooltip = (
-                f"BETA target: {prof.label}.\n\n{prof.beta_note}\n\n"
-                "Make sure the in-game vinyl editor is open with a fresh sphere-template group."
+                f"BETA target: {prof.label}.\n\n"
+                f"{prof.beta_note}\n\n"
+                "Make sure the in-game vinyl editor is open before injection."
             )
         else:
             tooltip = (
-                "Push the most-recent generated/loaded shapes JSON into the selected Forza title's "
-                "active vinyl group. Make sure the in-game vinyl editor is open with a fresh "
-                "sphere-template group before clicking."
+                "Inject the most recently generated or loaded JSON into the "
+                "selected Forza title."
             )
-        self.inject_btn.setToolTip(tooltip)
+
+        self.inject_btn.setToolTip(
+            tooltip
+        )
+
+    # ------------------------------------------------------------
+    # Profiles
+    # ------------------------------------------------------------
 
     def _populate_profiles(self) -> None:
         self.profile_combo.clear()
-        for path in list_bundled_profiles():
-            self.profile_combo.addItem(path.stem, str(path))
+
+        paths = list_bundled_profiles()
+
+        for path in paths:
+            self.profile_combo.addItem(
+                path.stem,
+                str(path),
+            )
+
         if self.profile_combo.count() == 0:
-            self.profile_combo.addItem("default", "")
+            self.profile_combo.addItem(
+                "default",
+                "",
+            )
+
+            return
+
+        # --------------------------------------------------------
+        # DEFAULT PROFILE
+        # --------------------------------------------------------
+        #
+        # Select logo_ultra automatically whenever it exists.
+        #
+        # --------------------------------------------------------
+
+        default_index = self.profile_combo.findText(
+            "logo_ultra"
+        )
+
+        if default_index >= 0:
+            self.profile_combo.setCurrentIndex(
+                default_index
+            )
+        else:
+            self.profile_combo.setCurrentIndex(0)
 
     def _on_profile_changed(self, idx: int) -> None:
+        if idx < 0:
+            return
+
         path = self.profile_combo.itemData(idx)
+
         if not path:
             return
+
         try:
-            prof = load_profile_from_file(path)
+            prof = load_profile_from_file(
+                path
+            )
         except Exception:
             return
-        # Mirror into advanced widgets without re-emitting per-spinbox.
-        for w in (self.stop_at, self.random_samples, self.mutated_samples, self.max_resolution, self.max_threads, self.preview_every):
-            w.blockSignals(True)
-        self.stop_at.setValue(prof.stop_at)
-        self.random_samples.setValue(prof.random_samples)
-        self.mutated_samples.setValue(prof.mutated_samples)
-        self.max_resolution.setValue(prof.max_resolution)
-        self.max_threads.setValue(prof.max_threads)
-        self.preview_every.setValue(prof.preview_every)
-        for w in (self.stop_at, self.random_samples, self.mutated_samples, self.max_resolution, self.max_threads, self.preview_every):
-            w.blockSignals(False)
+
+        widgets = (
+            self.stop_at,
+            self.random_samples,
+            self.mutated_samples,
+            self.max_resolution,
+            self.max_threads,
+            self.preview_every,
+        )
+
+        for widget in widgets:
+            widget.blockSignals(True)
+
+        self.stop_at.setValue(
+            prof.stop_at
+        )
+
+        self.random_samples.setValue(
+            prof.random_samples
+        )
+
+        self.mutated_samples.setValue(
+            prof.mutated_samples
+        )
+
+        self.max_resolution.setValue(
+            prof.max_resolution
+        )
+
+        self.max_threads.setValue(
+            prof.max_threads
+        )
+
+        self.preview_every.setValue(
+            prof.preview_every
+        )
+
+        for widget in widgets:
+            widget.blockSignals(False)
+
+        # --------------------------------------------------------
+        # Shape types
+        # --------------------------------------------------------
+
         for code, cb in self._shape_checks.items():
             cb.blockSignals(True)
-            # Disabled shape types (everything except rotated_ellipse in v0.3.5)
-            # stay unchecked regardless of what the loaded profile prefers,
-            # so a profile that requests triangles can't sneak past the gray-out.
-            if cb.isEnabled():
-                cb.setChecked(code in prof.shape_types)
-            else:
-                cb.setChecked(False)
+
+            cb.setChecked(
+                code in prof.shape_types
+            )
+
             cb.blockSignals(False)
-        # Sync the compute backend from the profile. GPU is always selectable —
-        # it resolves to OpenCL at run time and falls back to CPU if unavailable.
-        want = getattr(prof, "compute_backend", "auto")
-        ci = self.compute_backend.findData(want)
-        if ci >= 0:
+
+        # --------------------------------------------------------
+        # Compute backend
+        # --------------------------------------------------------
+
+        wanted_backend = getattr(
+            prof,
+            "compute_backend",
+            "auto",
+        )
+
+        compute_index = self.compute_backend.findData(
+            wanted_backend
+        )
+
+        if compute_index >= 0:
             self.compute_backend.blockSignals(True)
-            self.compute_backend.setCurrentIndex(ci)
+
+            self.compute_backend.setCurrentIndex(
+                compute_index
+            )
+
             self.compute_backend.blockSignals(False)
-        self.profile_changed.emit(self.build_profile())
+
+        self.profile_changed.emit(
+            self.build_profile()
+        )
+
+    # ------------------------------------------------------------
+    # Advanced controls
+    # ------------------------------------------------------------
 
     def _on_adv_changed(self, *_args) -> None:
-        self.profile_changed.emit(self.build_profile())
+        self.profile_changed.emit(
+            self.build_profile()
+        )
+
+    # ------------------------------------------------------------
+    # Build current profile
+    # ------------------------------------------------------------
 
     def build_profile(self) -> Profile:
         idx = self.profile_combo.currentIndex()
+
         path = self.profile_combo.itemData(idx) or ""
-        base = Profile(name=self.profile_combo.itemText(idx) or "custom")
+
+        base = Profile(
+            name=self.profile_combo.itemText(idx) or "custom"
+        )
+
         if path:
             try:
-                base = load_profile_from_file(path)
+                base = load_profile_from_file(
+                    path
+                )
             except Exception:
                 pass
+
         base.stop_at = self.stop_at.value()
+
         base.random_samples = self.random_samples.value()
+
         base.mutated_samples = self.mutated_samples.value()
+
         base.max_resolution = self.max_resolution.value()
-        # Experimental hard cap: never exceed 2048 px when the toggle is on,
-        # regardless of the profile (incl. extreme_quality) or the spinbox value.
+
         if self.cap_2048_cb.isChecked():
-            base.max_resolution = min(base.max_resolution, 2048)
+            base.max_resolution = min(
+                base.max_resolution,
+                2048,
+            )
+
         base.max_threads = self.max_threads.value()
+
         base.preview_every = self.preview_every.value()
-        base.shape_types = [code for code, cb in self._shape_checks.items() if cb.isChecked()] or ["rotated_ellipse"]
-        base.compute_backend = str(self.compute_backend.currentData() or "auto")
-        # Experimental hard cap: clamp resolution to 2048 px regardless of the
-        # profile/spinbox (extreme_quality included) when the toggle is on.
-        if self.cap_2048_cb.isChecked():
-            base.max_resolution = min(base.max_resolution, 2048)
+
+        selected_shapes = [
+            code
+            for code, cb in self._shape_checks.items()
+            if cb.isChecked()
+        ]
+
+        if not selected_shapes:
+            selected_shapes = [
+                "rotated_ellipse"
+            ]
+
+        base.shape_types = selected_shapes
+
+        base.compute_backend = str(
+            self.compute_backend.currentData()
+            or "auto"
+        )
+
         return base
 
+    # ------------------------------------------------------------
+    # Running state
+    # ------------------------------------------------------------
+
     def set_running(self, running: bool) -> None:
-        self.start_btn.setEnabled(not running)
-        self.pause_btn.setEnabled(running)
-        self.stop_btn.setEnabled(running)
+        self.start_btn.setEnabled(
+            not running
+        )
+
+        self.pause_btn.setEnabled(
+            running
+        )
+
+        self.stop_btn.setEnabled(
+            running
+        )

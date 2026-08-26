@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+import sys
+
 import numpy as np
 from PIL import Image
 from PySide6.QtCore import QObject, QThread, Signal
 
 from fd6.shapegen.engine import Engine, EngineConfig
+from fd6.shapegen.inline_engine import InlineEngine
 from fd6.shapegen.profile import Profile
 from fd6.io.exporter import save_json
 from fd6.io.json_schema import FD6Document
@@ -38,6 +41,23 @@ class GenerationWorker(QObject):
         self._paused = paused
         if self._engine:
             self._engine.set_pause(paused)
+
+    @staticmethod
+    def _engine_class() -> type[Engine]:
+        """Choose a CPU implementation safe for the current runtime.
+
+        PyInstaller one-file Windows builds occasionally re-enter the GUI when
+        ProcessPoolExecutor starts a child process. Generation already runs in a
+        dedicated QThread, so the frozen build can safely perform its CPU search
+        inline in that worker thread instead. Source/development runs retain the
+        normal multiprocessing Engine.
+
+        An explicit ``Threads = 1`` also selects the inline path, which gives us
+        a deterministic no-child-process diagnostic mode outside PyInstaller.
+        """
+        if getattr(sys, "frozen", False):
+            return InlineEngine
+        return Engine
 
     def run(self) -> None:
         try:
@@ -115,7 +135,8 @@ class GenerationWorker(QObject):
                     alpha_mask = np.asarray(am_img, dtype=np.uint8)
             target = np.asarray(img, dtype=np.uint8)
 
-            self._engine = Engine(target, EngineConfig(profile=self.profile), alpha_mask=alpha_mask)
+            engine_cls = self._engine_class()
+            self._engine = engine_cls(target, EngineConfig(profile=self.profile), alpha_mask=alpha_mask)
             stem = self.image_path.stem
             final_path = self.output_dir / f"{stem}.json"
 
@@ -123,7 +144,10 @@ class GenerationWorker(QObject):
                 if event.kind == "shape_committed":
                     self.progress.emit(event.shape_count, self.profile.stop_at, event.rms)
                 elif event.kind == "backend":
-                    self.backend_ready.emit(event.message)
+                    label = event.message
+                    if engine_cls is InlineEngine and "CPU" in label.upper():
+                        label += " (safe inline mode)"
+                    self.backend_ready.emit(label)
                 elif event.kind == "preview" and event.canvas is not None:
                     self.preview.emit(event.canvas)
                 elif event.kind == "checkpoint":

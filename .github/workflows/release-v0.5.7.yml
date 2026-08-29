@@ -1,0 +1,56 @@
+name: Release v0.5.7
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/release-v0.5.7.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout release source
+        uses: actions/checkout@v4
+        with:
+          ref: fix/windows-multiprocessing-startup
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Build ForzaDesigner6.exe
+        shell: cmd
+        run: |
+          call build_exe.bat
+          if not exist dist\ForzaDesigner6.exe exit /b 1
+
+      - name: Resolve source commit
+        id: source
+        shell: pwsh
+        run: |
+          $sha = git rev-parse HEAD
+          "sha=$sha" >> $env:GITHUB_OUTPUT
+
+      - name: Create v0.5.7 release with EXE
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create v0.5.7 .\dist\ForzaDesigner6.exe `
+            --repo ${{ github.repository }} `
+            --target "${{ steps.source.outputs.sha }}" `
+            --title "v0.5.7" `
+            --notes "Hard transparent-image boundary release. Transparent source pixels are treated as a strict no-draw region, Logo Ultra primitives are fully opaque to match FH injection, alpha masks preserve hard edges during resize, and the restored FH6 vinyl-group locator is included. Executable name remains exactly ForzaDesigner6.exe."

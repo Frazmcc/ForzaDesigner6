@@ -1,15 +1,19 @@
 @echo off
-REM Build a single-file FD6.exe with PyInstaller.
-REM Run from the FD6\ directory after `pip install -r requirements.txt`.
+REM Build the single-file ForzaDesigner6.exe with PyInstaller.
+REM Run from the ForzaDesigner6 directory after `py -m pip install -r requirements.txt`.
 
 setlocal
 cd /d "%~dp0"
 
-pyinstaller ^
+REM Remove the old legacy executable name so there is only one expected app name.
+if exist "dist\FD6MultiSupport.exe" del /q "dist\FD6MultiSupport.exe"
+
+py -m PyInstaller ^
     --noconfirm ^
+    --clean ^
     --onefile ^
     --windowed ^
-    --name "FD6MultiSupport" ^
+    --name "ForzaDesigner6" ^
     --icon "tools\fd6.ico" ^
     --add-data "fd6\settings\profiles;fd6\settings\profiles" ^
     --add-data "fd6\inject\patterns;fd6\inject\patterns" ^
@@ -69,6 +73,20 @@ pyinstaller ^
     -p . ^
     fd6\__main__.py
 
+if errorlevel 1 (
+    echo.
+    echo BUILD FAILED - ForzaDesigner6.exe was NOT created.
+    endlocal
+    exit /b 1
+)
+
+if not exist "dist\ForzaDesigner6.exe" (
+    echo.
+    echo BUILD FAILED - PyInstaller finished but dist\ForzaDesigner6.exe was not found.
+    endlocal
+    exit /b 1
+)
+
 echo.
-echo Built: dist\FD6MultiSupport.exe
+echo BUILD SUCCESSFUL: dist\ForzaDesigner6.exe
 endlocal

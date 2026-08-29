@@ -23,7 +23,11 @@ class Shape(ABC):
 
     type_name: ClassVar[ShapeType] = "shape"
 
-    color: tuple[int, int, int, int] = (0, 0, 0, 128)
+    # Forza vinyl layers are injected as fully opaque primitives. Keep the
+    # optimiser on the same rendering contract so the FD6 preview is solving
+    # for what the game will actually display instead of stacking 50% alpha
+    # shapes that become 100% opaque during injection.
+    color: tuple[int, int, int, int] = (0, 0, 0, 255)
 
     @abstractmethod
     def bbox(self, w: int, h: int) -> tuple[int, int, int, int]:

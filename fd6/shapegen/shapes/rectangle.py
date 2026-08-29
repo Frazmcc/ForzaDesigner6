@@ -65,7 +65,7 @@ class Rectangle(Shape):
             hw_cap = max(2.0, (w * max_size_frac) / 2.0)
             hh_cap = max(2.0, (h * max_size_frac) / 2.0)
         return cls(
-            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 128),
+            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 255),
             x=rng.uniform(0, w - 1), y=rng.uniform(0, h - 1),
             hw=rng.uniform(1, hw_cap), hh=rng.uniform(1, hh_cap),
         )
@@ -144,7 +144,7 @@ class RotatedRectangle(Shape):
             hw_cap = max(2.0, (w * max_size_frac) / 2.0)
             hh_cap = max(2.0, (h * max_size_frac) / 2.0)
         return cls(
-            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 128),
+            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 255),
             x=rng.uniform(0, w - 1), y=rng.uniform(0, h - 1),
             hw=rng.uniform(1, hw_cap), hh=rng.uniform(1, hh_cap),
             angle=rng.uniform(0, 180),

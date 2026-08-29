@@ -75,7 +75,7 @@ class Ellipse(Shape):
             rx_cap = max(2.0, (w * max_size_frac) / 2.0)
             ry_cap = max(2.0, (h * max_size_frac) / 2.0)
         return cls(
-            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 128),
+            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 255),
             x=rng.uniform(0, w - 1), y=rng.uniform(0, h - 1),
             rx=rng.uniform(1, rx_cap), ry=rng.uniform(1, ry_cap),
         )
@@ -160,7 +160,7 @@ class RotatedEllipse(Shape):
             rx_cap = max(2.0, (w * max_size_frac) / 2.0)
             ry_cap = max(2.0, (h * max_size_frac) / 2.0)
         return cls(
-            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 128),
+            color=(rng.randint(0, 255), rng.randint(0, 255), rng.randint(0, 255), 255),
             x=rng.uniform(0, w - 1), y=rng.uniform(0, h - 1),
             rx=rng.uniform(1, rx_cap), ry=rng.uniform(1, ry_cap),
             angle=rng.uniform(0, 180),

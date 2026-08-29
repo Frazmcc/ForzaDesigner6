@@ -33,15 +33,11 @@ def compute_edge_weight(
     (the target doesn't change) and reuse for every score.
     """
     h, w = target.shape[:2]
-    # Luminance — cheap proxy for "what the eye sees" so eye/mouth/outline
-    # edges register on grayscale gradients even when the RGB diff is mild.
     lum = (
         target[:, :, 0].astype(np.float32) * 0.299
         + target[:, :, 1].astype(np.float32) * 0.587
         + target[:, :, 2].astype(np.float32) * 0.114
     )
-    # 3×3 Sobel kernels expressed as a manual convolution (avoids a SciPy
-    # dependency, fast enough since we only run it once per generation).
     pad = np.pad(lum, 1, mode="edge")
     gx = (
         -1.0 * pad[0:h, 0:w]   + 0.0 * pad[0:h, 1:w+1]   + 1.0 * pad[0:h, 2:w+2]
@@ -56,7 +52,6 @@ def compute_edge_weight(
     mag = np.sqrt(gx * gx + gy * gy)
     max_mag = float(mag.max())
     if max_mag < 1e-6:
-        # Flat image — every pixel is baseline weight.
         norm = np.ones((h, w), dtype=np.float32)
     else:
         norm = 1.0 + (boost - 1.0) * (mag / max_mag).astype(np.float32)
@@ -71,16 +66,7 @@ def rms_error(
     alpha_mask: np.ndarray | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> float:
-    """RMS pixel error between two (H, W, 3) uint8 images. Lower is better.
-
-    If `alpha_mask` (H, W) uint8 is given, only pixels where alpha>0 contribute; transparent
-    pixels are ignored (sticker mode). The RMS is normalized by the count of contributing pixels.
-
-    If `edge_weight` (H, W) float32 is given, per-pixel squared error is
-    multiplied by the weight (smooth interior=1, edge≈EDGE_BOOST). When
-    combined with `alpha_mask`, the weight already encodes the alpha gate so
-    transparent pixels stay at zero.
-    """
+    """RMS pixel error between two (H, W, 3) uint8 images. Lower is better."""
     diff = a.astype(np.int32) - b.astype(np.int32)
     sq = diff * diff
     if edge_weight is not None:
@@ -107,11 +93,7 @@ def compute_optimal_color(
     bbox: tuple[int, int, int, int],
     alpha: int,
 ) -> tuple[int, int, int, int]:
-    """For a given shape mask and fixed alpha, compute the RGB color that minimizes RMS over the masked region.
-
-    Closed-form: with `over` compositing `out = a*src + (1-a)*dst`, RMS is minimized when
-    src = (target - (1-a)*dst) / a, averaged over the masked pixels.
-    """
+    """For a given shape mask and fixed alpha, compute the RGB color that minimizes RMS over the masked region."""
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return (0, 0, 0, alpha)
@@ -131,6 +113,27 @@ def compute_optimal_color(
     return (int(avg[0]), int(avg[1]), int(avg[2]), alpha)
 
 
+def _respects_hard_alpha_boundary(mask_local: np.ndarray, region_alpha: np.ndarray) -> bool:
+    """Return True only when every rasterized candidate pixel stays inside source alpha.
+
+    Sticker mode represents a real Forza vinyl group, not a composited bitmap.
+    Forza renders the whole primitive; it cannot clip an ellipse/rectangle to the
+    PNG alpha mask. Therefore any candidate pixel that overlaps a fully
+    transparent source pixel is illegal. We deliberately use ``mask_local > 0``
+    rather than a 50%/128 body threshold so even the candidate's anti-aliased
+    raster footprint must remain inside the source silhouette.
+
+    Partially transparent source-edge pixels are considered part of the source
+    silhouette; only alpha==0 is forbidden. This preserves the original PNG's
+    outer support without inventing an artificial inward threshold.
+    """
+    footprint = mask_local > 0
+    if not footprint.any():
+        return False
+    allowed = region_alpha > 0
+    return not bool(np.any(footprint & ~allowed))
+
+
 def composite(
     current: np.ndarray,
     shape: Shape,
@@ -138,21 +141,18 @@ def composite(
     alpha_mask: np.ndarray | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Composite shape over current canvas with optimal color. Return (new_canvas, new_rms).
-
-    In sticker mode (alpha_mask provided), the shape's per-pixel mask is AND-ed with the
-    target's alpha mask so paint never lands in transparent areas — the dark-grey canvas
-    background stays visible there, which is what the user expects from sticker mode.
-    """
+    """Composite shape over current canvas with optimal color. Return (new_canvas, new_rms)."""
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return current, rms_error(current, target, alpha_mask)
-    # Combine shape mask with alpha mask if in sticker mode
     if alpha_mask is not None:
         region_alpha = alpha_mask[y0:y1, x0:x1]
-        # Element-wise min: paint only where both shape AND opaque
+        # A committed sticker shape should already have passed the strict
+        # boundary gate in score_shape. Keep the clipping here as a defensive
+        # preview safeguard, but it must never be relied on to make an illegal
+        # candidate appear legal.
         effective_mask = np.minimum(mask_local, region_alpha)
     else:
         effective_mask = mask_local
@@ -168,35 +168,13 @@ def composite(
     return new, rms_error(new, target, alpha_mask, edge_weight)
 
 
-# In sticker mode, virtually every "solid" pixel of a candidate shape must sit
-# inside the opaque region. Anything less and the shape's body bleeds past the
-# alpha edge in FH6 (no per-pixel alpha there → solid blob in transparent space).
-# Counted against pixels where mask_local >= 128 (i.e., the shape's actual body,
-# excluding anti-aliased fringe) so AA at the silhouette doesn't disqualify
-# otherwise-clean shapes.
-STICKER_OVERLAP_MIN = 0.995
-
-
 def precompute_canvas_error(
     current: np.ndarray,
     target: np.ndarray,
     alpha_mask: np.ndarray | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> tuple[float, float]:
-    """Return (full_canvas_squared_error, normalizer_n) for the current canvas.
-
-    These are constants for the lifetime of a single canvas snapshot — they
-    don't depend on the candidate shape being scored — so a batch of N
-    candidate evaluations against the same canvas can compute them ONCE
-    instead of N times. This is what made score_shape O(image_size × N) at
-    high resolutions; with the cache it's O(image_size + bbox_size × N).
-
-    The math is identical to what score_shape did inline before. Same
-    result, ~N× less work for the random-search phase.
-
-    When `edge_weight` is provided it supersedes the boolean alpha gate (the
-    weight map already folds in alpha=0 from compute_edge_weight).
-    """
+    """Return (full_canvas_squared_error, normalizer_n) for the current canvas."""
     if edge_weight is not None:
         weight_full = edge_weight[:, :, None]
         diff = (current.astype(np.float32) - target.astype(np.float32)) ** 2
@@ -225,42 +203,26 @@ def score_shape(
     canvas_norm: float | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> tuple[float, tuple[int, int, int, int]]:
-    """Score a candidate without modifying the working canvas. Returns (rms_if_committed, optimal_color).
+    """Score a candidate without modifying the working canvas.
 
-    `canvas_full_sq` and `canvas_norm` may be precomputed via
-    `precompute_canvas_error` and reused across many candidate evaluations
-    against the SAME canvas. When None, they're computed here — semantically
-    identical, just slower.
-
-    Sticker-mode contract: a shape must sit ESSENTIALLY ENTIRELY inside the
-    opaque region or it gets rejected with +inf. FH6 paints the full ellipse
-    with no per-pixel alpha, so any shape that bleeds past the silhouette
-    will render its body in what should be transparent space — exactly the
-    'black outline artifacts' the user reported.
+    Sticker-mode contract is intentionally absolute: if any rasterized part of
+    the candidate touches an alpha==0 source pixel, return +inf. This makes the
+    transparent boundary a hard geometric constraint rather than a soft score.
+    Slight under-fill is preferred to any protrusion outside the source image.
     """
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return float("inf"), shape.color
+
     effective_mask = mask_local
     if alpha_mask is not None:
         region_alpha = alpha_mask[y0:y1, x0:x1]
-        # Count only "solid" body pixels (alpha >=128) — ignores AA fringe so
-        # antialiased silhouette edges don't artificially disqualify shapes.
-        shape_body = mask_local >= 128
-        body_total = float(shape_body.sum())
-        if body_total < 1.0:
+        if not _respects_hard_alpha_boundary(mask_local, region_alpha):
             return float("inf"), shape.color
-        opaque_body = region_alpha >= 128
-        if not opaque_body.any():
-            return float("inf"), shape.color
-        inside = float((shape_body & opaque_body).sum())
-        if inside / body_total < STICKER_OVERLAP_MIN:
-            return float("inf"), shape.color
-        # AND-mask for color so the zeroed-out RGB of transparent pixels in
-        # `target` can't drag the optimal color toward black.
         effective_mask = np.minimum(mask_local, region_alpha)
+
     color = compute_optimal_color(target, current, effective_mask, bbox, shape.color[3])
     a = color[3] / 255.0
     region_cur = current[y0:y1, x0:x1].astype(np.float32)
@@ -269,7 +231,7 @@ def score_shape(
     m = (mask_local.astype(np.float32) / 255.0)[:, :, None]
     blended = m * (a * src + (1.0 - a) * region_cur) + (1.0 - m) * region_cur
     diff_in = blended - region_tgt
-    # Edge-weighted path supersedes the boolean alpha gate when present.
+
     if edge_weight is not None:
         if canvas_full_sq is None or canvas_norm is None:
             full_sq, n = precompute_canvas_error(current, target, alpha_mask, edge_weight)
@@ -282,6 +244,7 @@ def score_shape(
         if n < 1:
             return 0.0, color
         return float(np.sqrt(max(0.0, total_sq) / n)), color
+
     if alpha_mask is None:
         if canvas_full_sq is None or canvas_norm is None:
             full_sq, n_px = precompute_canvas_error(current, target, None)
@@ -291,7 +254,7 @@ def score_shape(
         region_new_sq = float((diff_in ** 2).sum())
         total_sq = full_sq - region_old_sq + region_new_sq
         return float(np.sqrt(max(0.0, total_sq) / n_px)), color
-    # Sticker mode (no edge weight): weighted RMS, only opaque pixels contribute
+
     if canvas_full_sq is None or canvas_norm is None:
         full_sq, n = precompute_canvas_error(current, target, alpha_mask)
     else:

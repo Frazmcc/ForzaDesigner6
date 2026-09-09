@@ -11,11 +11,14 @@ Replica-first policy:
 - enabled primitive types compete on fitness instead of receiving fixed quotas;
 - unfinished high-error regions are periodically re-weighted;
 - candidate size shrinks aggressively through the run so the back half refines
-  contours, lettering and small details instead of adding more coarse blocks.
+  contours, lettering and small details instead of adding more coarse blocks;
+- a candidate is never allowed to make the true unweighted source RMS worse.
 """
 
+import numpy as np
+
 from fd6.shapegen.engine import Engine
-from fd6.shapegen.scoring import precompute_canvas_error, score_shape
+from fd6.shapegen.scoring import precompute_canvas_error, rms_error, score_shape
 from fd6.shapegen.shapes import Shape, random_shape
 
 
@@ -67,6 +70,11 @@ class InlineEngine(Engine):
         considers every enabled profile type on every iteration.  Random budget
         is divided evenly across types, then the single best candidate across
         all types receives the mutation/hill-climb budget.
+
+        Candidates are ranked with edge/silhouette weighting, but they must also
+        pass a second invariant: their ordinary source RMS may not increase.
+        This keeps the optimiser faithful to the whole image while still using
+        stronger weights to decide WHERE the next useful layer should go.
         """
         n_random = max(1, n_random)
         n_mutate = max(1, n_mutate)
@@ -75,12 +83,21 @@ class InlineEngine(Engine):
         if not allowed_types:
             allowed_types = [t for t in types if t] or ["rotated_ellipse"]
 
-        canvas_full_sq, canvas_norm = precompute_canvas_error(
+        # Weighted canvas error drives salience/edge preference.
+        weighted_full_sq, weighted_norm = precompute_canvas_error(
             self.canvas,
             self.target,
             self.alpha_mask,
             self.edge_weight,
         )
+        # Ordinary source error is the hard monotonic fidelity guard.
+        raw_full_sq, raw_norm = precompute_canvas_error(
+            self.canvas,
+            self.target,
+            self.alpha_mask,
+            None,
+        )
+        current_raw_rms = float(np.sqrt(max(0.0, raw_full_sq) / max(raw_norm, 1.0)))
 
         best_score = float("inf")
         best_color = None
@@ -101,17 +118,37 @@ class InlineEngine(Engine):
                     [type_name],
                     max_size_frac=max_size_frac,
                 )
-                score, color = score_shape(
+
+                weighted_score, color = score_shape(
                     shape,
                     self.canvas,
                     self.target,
                     self.alpha_mask,
-                    canvas_full_sq=canvas_full_sq,
-                    canvas_norm=canvas_norm,
+                    canvas_full_sq=weighted_full_sq,
+                    canvas_norm=weighted_norm,
                     edge_weight=self.edge_weight,
                 )
-                if score < best_score:
-                    best_score = score
+                if not np.isfinite(weighted_score):
+                    continue
+
+                # Same primitive/color fitting, but measured against the true
+                # unweighted image.  Reject anything that makes the overall
+                # source reconstruction worse even if it helps a highly-weighted
+                # edge region.
+                raw_score, _ = score_shape(
+                    shape,
+                    self.canvas,
+                    self.target,
+                    self.alpha_mask,
+                    canvas_full_sq=raw_full_sq,
+                    canvas_norm=raw_norm,
+                    edge_weight=None,
+                )
+                if raw_score > current_raw_rms + 1e-9:
+                    continue
+
+                if weighted_score < best_score:
+                    best_score = weighted_score
                     best_color = color
                     best_shape = shape
 
@@ -124,17 +161,36 @@ class InlineEngine(Engine):
         # Refine the geometry that actually won the cross-type competition.
         for _ in range(n_mutate):
             candidate = best_shape.mutate(self.rng, self.w, self.h)
-            score, color = score_shape(
+            weighted_score, color = score_shape(
                 candidate,
                 self.canvas,
                 self.target,
                 self.alpha_mask,
-                canvas_full_sq=canvas_full_sq,
-                canvas_norm=canvas_norm,
+                canvas_full_sq=weighted_full_sq,
+                canvas_norm=weighted_norm,
                 edge_weight=self.edge_weight,
             )
-            if score < best_score:
-                best_score = score
+            if not np.isfinite(weighted_score):
+                no_improve += 1
+                continue
+
+            raw_score, _ = score_shape(
+                candidate,
+                self.canvas,
+                self.target,
+                self.alpha_mask,
+                canvas_full_sq=raw_full_sq,
+                canvas_norm=raw_norm,
+                edge_weight=None,
+            )
+            if raw_score > current_raw_rms + 1e-9:
+                no_improve += 1
+                if no_improve >= max(30, n_mutate // 3):
+                    break
+                continue
+
+            if weighted_score < best_score:
+                best_score = weighted_score
                 best_color = color
                 best_shape = candidate
                 no_improve = 0
@@ -147,3 +203,19 @@ class InlineEngine(Engine):
             best_shape.color = best_color
 
         return best_score, best_shape
+
+    def run(self):
+        """Expose ordinary source RMS in progress/done events.
+
+        The base Engine uses edge-weighted scoring to choose useful shapes, and
+        composite() returns that weighted RMS.  That number is not comparable to
+        the unweighted RMS used at engine startup.  Recalculate the true source
+        RMS before every externally visible event so progress is apples-to-apples
+        and can never appear to get worse merely because the weighting changed.
+        """
+        for event in super().run():
+            if event.kind in {"shape_committed", "preview", "checkpoint", "done"}:
+                true_rms = rms_error(self.canvas, self.target, self.alpha_mask)
+                self.rms = true_rms
+                event.rms = true_rms
+            yield event

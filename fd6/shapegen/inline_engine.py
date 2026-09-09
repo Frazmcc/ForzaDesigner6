@@ -10,6 +10,8 @@ Replica-first policy:
 - every layer budget has the SAME objective: closest possible reconstruction;
 - enabled primitive types compete on fitness instead of receiving fixed quotas;
 - unfinished high-error regions are periodically re-weighted;
+- most random candidates are proposed near pixels that are still wrong instead
+  of wasting the finite search budget uniformly across already-good regions;
 - candidate size shrinks aggressively through the run so the back half refines
   contours, lettering and small details instead of adding more coarse blocks;
 - a candidate is never allowed to make the true unweighted source RMS worse.
@@ -32,6 +34,12 @@ class InlineEngine(Engine):
     RESIDUAL_REFRESH_EVERY = 10
     RESIDUAL_BOOST = 3.0
 
+    # Candidate proposal policy. Fitness still decides which primitive wins;
+    # this only decides where most RANDOM proposals begin. Keeping 25% uniform
+    # proposals preserves exploration and avoids getting trapped in one region.
+    FOCUS_CANDIDATE_FRACTION = 0.75
+    FOCUS_RESIDUAL_POWER = 1.5
+
     def _max_size_frac_for_progress(self, progress: float) -> float:
         """Progressive coarse-to-fine geometry schedule for ANY layer count.
 
@@ -51,6 +59,63 @@ class InlineEngine(Engine):
         if progress < 0.90:
             return 0.040
         return 0.025      # final 10%: contour/lettering/detail cleanup
+
+    def _build_focus_cdf(self) -> tuple[np.ndarray | None, float]:
+        """Build a weighted distribution of pixels that still need correction.
+
+        Uniform random centres spend most candidate evaluations in large flat
+        regions once those regions are already close to the target.  That is a
+        poor use of a finite random-sample budget.  Instead, combine CURRENT
+        source residual with the live edge/silhouette importance map and sample
+        most candidate centres from that distribution.
+
+        This is proposal guidance only: score_shape remains the authority, the
+        hard transparent boundary still rejects illegal geometry, and 25% of
+        candidates remain uniformly placed for global exploration.
+        """
+        residual = np.abs(
+            self.canvas.astype(np.float32) - self.target.astype(np.float32)
+        ).mean(axis=2) / 255.0
+        residual = np.power(residual, self.FOCUS_RESIDUAL_POWER, dtype=np.float32)
+
+        importance = residual * self.edge_weight.astype(np.float32, copy=False)
+        if self.alpha_mask is not None:
+            importance *= (self.alpha_mask > 0).astype(np.float32)
+
+        flat = importance.reshape(-1).astype(np.float64)
+        total = float(flat.sum())
+        if not np.isfinite(total) or total <= 1e-12:
+            return None, 0.0
+        return np.cumsum(flat), total
+
+    def _focus_candidate(
+        self,
+        shape: Shape,
+        focus_cdf: np.ndarray | None,
+        focus_total: float,
+    ) -> Shape:
+        """Move a proposal centre onto a still-wrong source region most of the time."""
+        if (
+            focus_cdf is None
+            or focus_total <= 0.0
+            or not hasattr(shape, "x")
+            or not hasattr(shape, "y")
+            or self.rng.random() >= self.FOCUS_CANDIDATE_FRACTION
+        ):
+            return shape
+
+        needle = self.rng.random() * focus_total
+        idx = int(np.searchsorted(focus_cdf, needle, side="left"))
+        idx = min(max(idx, 0), self.w * self.h - 1)
+        y, x = divmod(idx, self.w)
+
+        # Tiny jitter keeps multiple proposals from sharing precisely the same
+        # centre while remaining local to the high-value residual region.
+        jitter_x = self.rng.uniform(-2.0, 2.0)
+        jitter_y = self.rng.uniform(-2.0, 2.0)
+        shape.x = max(0.0, min(float(self.w - 1), float(x) + jitter_x))
+        shape.y = max(0.0, min(float(self.h - 1), float(y) + jitter_y))
+        return shape
 
     def _parallel_search(
         self,
@@ -99,6 +164,11 @@ class InlineEngine(Engine):
         )
         current_raw_rms = float(np.sqrt(max(0.0, raw_full_sq) / max(raw_norm, 1.0)))
 
+        # Build once per committed layer, not once per candidate. This turns the
+        # finite random budget into useful local proposals around the current
+        # residual while keeping the score math unchanged.
+        focus_cdf, focus_total = self._build_focus_cdf()
+
         best_score = float("inf")
         best_color = None
         best_shape: Shape | None = None
@@ -118,6 +188,7 @@ class InlineEngine(Engine):
                     [type_name],
                     max_size_frac=max_size_frac,
                 )
+                shape = self._focus_candidate(shape, focus_cdf, focus_total)
 
                 weighted_score, color = score_shape(
                     shape,

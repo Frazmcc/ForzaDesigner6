@@ -141,21 +141,27 @@ def composite(
     alpha_mask: np.ndarray | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Composite shape over current canvas with optimal color. Return (new_canvas, new_rms)."""
+    """Composite one complete primitive exactly as FH6 will render it.
+
+    In sticker mode the candidate scorer already rejects any primitive whose
+    raster footprint touches fully transparent source space. Do NOT clip a legal
+    primitive to the PNG alpha mask here: FH6 has no per-primitive bitmap clip,
+    so clipping the preview would make FD6 look cleaner than the injected vinyl.
+    """
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return current, rms_error(current, target, alpha_mask)
+
     if alpha_mask is not None:
         region_alpha = alpha_mask[y0:y1, x0:x1]
-        # A committed sticker shape should already have passed the strict
-        # boundary gate in score_shape. Keep the clipping here as a defensive
-        # preview safeguard, but it must never be relied on to make an illegal
-        # candidate appear legal.
-        effective_mask = np.minimum(mask_local, region_alpha)
-    else:
-        effective_mask = mask_local
+        if not _respects_hard_alpha_boundary(mask_local, region_alpha):
+            # This should never occur for a scorer-approved shape. Refuse to
+            # create a misleading clipped preview if a caller bypasses scoring.
+            return current, rms_error(current, target, alpha_mask, edge_weight)
+
+    effective_mask = mask_local
     color = compute_optimal_color(target, current, effective_mask, bbox, shape.color[3])
     new = current.copy()
     a = color[3] / 255.0

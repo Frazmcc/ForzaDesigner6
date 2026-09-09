@@ -54,6 +54,52 @@ def test_detail_schedule_is_coarse_to_fine_for_every_budget() -> None:
     assert values[-1] <= 0.025
 
 
+def test_focus_distribution_targets_remaining_error() -> None:
+    engine = InlineEngine.__new__(InlineEngine)
+    engine.w = 8
+    engine.h = 8
+    engine.canvas = np.zeros((8, 8, 3), dtype=np.uint8)
+    engine.target = np.zeros((8, 8, 3), dtype=np.uint8)
+    engine.target[6, 5] = (255, 255, 255)
+    engine.alpha_mask = None
+    engine.edge_weight = np.ones((8, 8), dtype=np.float32)
+    engine.rng = random.Random(7)
+
+    cdf, total = engine._build_focus_cdf()
+
+    assert cdf is not None
+    assert total > 0.0
+    # There is exactly one residual pixel, so all weighted probability must end
+    # at that pixel's flat index.
+    flat_index = 6 * 8 + 5
+    before = cdf[flat_index - 1] if flat_index > 0 else 0.0
+    assert before == 0.0
+    assert cdf[flat_index] == total
+
+
+def test_focused_candidate_moves_near_remaining_error() -> None:
+    class DummyShape:
+        x = 0.0
+        y = 0.0
+
+    engine = InlineEngine.__new__(InlineEngine)
+    engine.w = 10
+    engine.h = 10
+    engine.canvas = np.zeros((10, 10, 3), dtype=np.uint8)
+    engine.target = np.zeros((10, 10, 3), dtype=np.uint8)
+    engine.target[8, 7] = (255, 255, 255)
+    engine.alpha_mask = None
+    engine.edge_weight = np.ones((10, 10), dtype=np.float32)
+    engine.rng = random.Random(1)
+    engine.FOCUS_CANDIDATE_FRACTION = 1.0
+
+    cdf, total = engine._build_focus_cdf()
+    shape = engine._focus_candidate(DummyShape(), cdf, total)
+
+    assert abs(shape.x - 7.0) <= 2.0
+    assert abs(shape.y - 8.0) <= 2.0
+
+
 def test_enabled_shape_types_compete_instead_of_receiving_output_quota(monkeypatch) -> None:
     import fd6.shapegen.inline_engine as inline_module
 

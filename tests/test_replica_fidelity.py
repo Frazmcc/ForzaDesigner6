@@ -16,20 +16,14 @@ def test_transparent_silhouette_boundary_is_highest_priority() -> None:
 
     weight = compute_edge_weight(target, alpha)
 
-    # Fully transparent space never contributes to fitness.
     assert weight[0, 0] == 0.0
-    # Flat interior still matters.
     assert weight[4, 4] >= 1.0
-    # The exact visible alpha edge is substantially more important than the
-    # flat interior, forcing any layer budget to protect/refine the silhouette.
     assert weight[2, 4] > weight[4, 4]
     assert weight[2, 4] >= 12.0
 
 
 def test_coloured_edge_is_detected_even_with_similar_luminance() -> None:
     target = np.zeros((12, 12, 3), dtype=np.uint8)
-    # Two clearly different colours. The scorer must inspect RGB channels, not
-    # luminance alone, so chromatic logo boundaries remain important.
     target[:, :6] = (255, 0, 0)
     target[:, 6:] = (0, 130, 0)
 
@@ -69,8 +63,6 @@ def test_focus_distribution_targets_remaining_error() -> None:
 
     assert cdf is not None
     assert total > 0.0
-    # There is exactly one residual pixel, so all weighted probability must end
-    # at that pixel's flat index.
     flat_index = 6 * 8 + 5
     before = cdf[flat_index - 1] if flat_index > 0 else 0.0
     assert before == 0.0
@@ -100,6 +92,47 @@ def test_focused_candidate_moves_near_remaining_error() -> None:
     assert abs(shape.y - 8.0) <= 2.0
 
 
+def test_detail_hotspot_shrinks_ellipse_geometry() -> None:
+    class DummyEllipse:
+        x = 5.0
+        y = 5.0
+        rx = 20.0
+        ry = 10.0
+
+    engine = InlineEngine.__new__(InlineEngine)
+    engine.w = 12
+    engine.h = 12
+    engine.edge_weight = np.ones((12, 12), dtype=np.float32)
+    engine.edge_weight[5, 5] = 10.0
+    engine.rng = random.Random(2)
+
+    shape = DummyEllipse()
+    result = engine._shrink_shape_for_detail_hotspot(shape)
+
+    assert 1.0 <= result.rx < 20.0
+    assert 1.0 <= result.ry < 10.0
+
+
+def test_flat_region_does_not_force_detail_shrink() -> None:
+    class DummyRectangle:
+        x = 4.0
+        y = 4.0
+        hw = 12.0
+        hh = 8.0
+
+    engine = InlineEngine.__new__(InlineEngine)
+    engine.w = 10
+    engine.h = 10
+    engine.edge_weight = np.ones((10, 10), dtype=np.float32)
+    engine.rng = random.Random(3)
+
+    shape = DummyRectangle()
+    result = engine._shrink_shape_for_detail_hotspot(shape)
+
+    assert result.hw == 12.0
+    assert result.hh == 8.0
+
+
 def test_enabled_shape_types_compete_instead_of_receiving_output_quota(monkeypatch) -> None:
     import fd6.shapegen.inline_engine as inline_module
 
@@ -119,8 +152,6 @@ def test_enabled_shape_types_compete_instead_of_receiving_output_quota(monkeypat
         return DummyShape(allowed_types[0])
 
     def fake_score_shape(shape, *_args, **_kwargs):
-        # Rectangle is deliberately the better fit. The search should commit it
-        # regardless of whichever one-type hint Engine.run supplied this turn.
         score = 1.0 if shape.type_name == "rotated_rectangle" else 10.0
         return score, (0, 0, 0, 255)
 

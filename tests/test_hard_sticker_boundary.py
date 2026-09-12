@@ -1,10 +1,13 @@
 import random
 
 import numpy as np
+from PIL import Image
 
+from fd6.shapegen.profile import load_profile
 from fd6.shapegen.scoring import _respects_hard_alpha_boundary, score_shape
 from fd6.shapegen.shapes.ellipse import RotatedEllipse
 from fd6.shapegen.shapes.rectangle import RotatedRectangle
+from fd6.shapegen.worker import prepare_solid_logo_rgba
 
 
 def test_hard_boundary_accepts_shape_fully_inside_alpha():
@@ -49,3 +52,33 @@ def test_logo_primitives_generate_fully_opaque():
     ellipse = RotatedEllipse.random(rng, 64, 64)
     assert rect.color[3] == 255
     assert ellipse.color[3] == 255
+
+
+def test_solid_logo_preprocessing_removes_antialias_grey():
+    rgba = Image.fromarray(
+        np.array(
+            [
+                [[80, 80, 80, 40], [120, 120, 120, 127], [180, 180, 180, 128], [240, 240, 240, 255]],
+            ],
+            dtype=np.uint8,
+        ),
+        "RGBA",
+    )
+
+    rgb, alpha = prepare_solid_logo_rgba(rgba, 128)
+    out = np.asarray(rgb, dtype=np.uint8)
+
+    # Colour is never inherited from the PNG anti-alias fringe: all legal logo
+    # pixels target pure black, and membership is decided only by alpha.
+    assert np.all(out == 0)
+    assert alpha.tolist() == [[0, 0, 255, 255]]
+
+
+def test_solid_logo_profile_round_trip_fields_parse():
+    profile = load_profile(
+        "solid-test",
+        """[profile]\nsolidLogoMode = true\nsolidLogoAlphaThreshold = 140\npreserveTransparency = true\n""",
+    )
+    assert profile.solid_logo_mode is True
+    assert profile.solid_logo_alpha_threshold == 140
+    assert profile.preserve_transparency is True

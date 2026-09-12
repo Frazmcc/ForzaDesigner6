@@ -5,14 +5,86 @@ import numpy as np
 from fd6.shapegen.shapes.base import Shape
 
 
-# Edge-weighted scoring: how much more an edge pixel counts toward fitness vs
-# a smooth interior pixel. With EDGE_BOOST=6, a shape that nails a 3px pupil
-# outline is worth more than a shape that smooths over a 100px cheek block —
-# without this, the random sampler drifts toward big translucent ellipses
-# because they get good *averaged* error even when they miss every salient
-# detail (eyes, mouths, hard outlines). Cheap Sobel magnitude, normalized to
-# [1, EDGE_BOOST] so smooth regions still contribute baseline weight 1.
-EDGE_BOOST = 6.0
+# Replica-first scoring.  Every run has the same objective regardless of layer
+# count: minimise visible difference from the source.  Extra layers only give
+# the optimiser more budget to approach that objective.
+EDGE_BOOST = 10.0
+SILHOUETTE_EDGE_BOOST = 18.0
+SILHOUETTE_INNER_BOOSTS = (12.0, 7.0, 4.0)
+
+
+def _shift_bool(mask: np.ndarray, dy: int, dx: int) -> np.ndarray:
+    """Return mask shifted by (dy, dx), filling exposed pixels with False."""
+    out = np.zeros_like(mask, dtype=bool)
+    h, w = mask.shape
+    sy0 = max(0, -dy)
+    sy1 = min(h, h - dy)
+    sx0 = max(0, -dx)
+    sx1 = min(w, w - dx)
+    dy0 = max(0, dy)
+    dy1 = dy0 + (sy1 - sy0)
+    dx0 = max(0, dx)
+    dx1 = dx0 + (sx1 - sx0)
+    if sy1 > sy0 and sx1 > sx0:
+        out[dy0:dy1, dx0:dx1] = mask[sy0:sy1, sx0:sx1]
+    return out
+
+
+def _dilate8(mask: np.ndarray) -> np.ndarray:
+    """One-pixel 8-neighbour dilation without a SciPy dependency."""
+    out = mask.copy()
+    for dy in (-1, 0, 1):
+        for dx in (-1, 0, 1):
+            if dy == 0 and dx == 0:
+                continue
+            out |= _shift_bool(mask, dy, dx)
+    return out
+
+
+def _silhouette_boundary(allowed: np.ndarray) -> np.ndarray:
+    """Pixels inside the source silhouette that touch forbidden transparency."""
+    if not allowed.any():
+        return np.zeros_like(allowed, dtype=bool)
+    all_neighbours_inside = np.ones_like(allowed, dtype=bool)
+    for dy, dx in ((-1, -1), (-1, 0), (-1, 1), (0, -1), (0, 1), (1, -1), (1, 0), (1, 1)):
+        all_neighbours_inside &= _shift_bool(allowed, dy, dx)
+    return allowed & ~all_neighbours_inside
+
+
+def _rgb_gradient_strength(target: np.ndarray) -> np.ndarray:
+    """Sobel-like RGB gradient in [0, 1], preserving coloured edges too.
+
+    Using only luminance can miss strong colour transitions with similar
+    brightness.  A replica optimiser must see both tonal and chromatic edges,
+    so compute the Sobel magnitude independently per channel and keep the
+    strongest channel response.
+    """
+    h, w = target.shape[:2]
+    t = target.astype(np.float32)
+    mags: list[np.ndarray] = []
+    for channel in range(3):
+        src = t[:, :, channel]
+        pad = np.pad(src, 1, mode="edge")
+        gx = (
+            -pad[0:h, 0:w] + pad[0:h, 2:w + 2]
+            - 2.0 * pad[1:h + 1, 0:w] + 2.0 * pad[1:h + 1, 2:w + 2]
+            - pad[2:h + 2, 0:w] + pad[2:h + 2, 2:w + 2]
+        )
+        gy = (
+            -pad[0:h, 0:w] - 2.0 * pad[0:h, 1:w + 1] - pad[0:h, 2:w + 2]
+            + pad[2:h + 2, 0:w] + 2.0 * pad[2:h + 2, 1:w + 1] + pad[2:h + 2, 2:w + 2]
+        )
+        mags.append(np.sqrt(gx * gx + gy * gy))
+    mag = np.maximum.reduce(mags)
+    # Robust normalization prevents a single extreme highlight from making all
+    # other useful edges look insignificant.
+    positive = mag[mag > 1e-6]
+    if positive.size == 0:
+        return np.zeros((h, w), dtype=np.float32)
+    scale = float(np.percentile(positive, 99.0))
+    if scale < 1e-6:
+        scale = float(positive.max())
+    return np.clip(mag / max(scale, 1e-6), 0.0, 1.0).astype(np.float32)
 
 
 def compute_edge_weight(
@@ -20,44 +92,42 @@ def compute_edge_weight(
     alpha_mask: np.ndarray | None = None,
     boost: float = EDGE_BOOST,
 ) -> np.ndarray:
-    """Build an H×W float32 importance map for `target`.
+    """Build an H×W replica-importance map.
 
-    Combines a Sobel-gradient magnitude (normalized 0..1) with the alpha mask
-    so the result is:
-        - 0       where alpha_mask says transparent / buffer (ignored entirely)
-        - 1       in smooth interior regions
-        - up to `boost` on the strongest edges
+    The optimisation objective is the same for 500 or 2500 layers.  This map
+    simply says which source errors are most visually expensive:
 
-    Pass this to `rms_error` / `precompute_canvas_error` / `score_shape` /
-    `composite` as the `edge_weight` keyword. Build it ONCE per generation
-    (the target doesn't change) and reuse for every score.
+    * baseline interior pixels still count (weight 1), so texture and colour are
+      never discarded;
+    * RGB/chromatic edges receive up to ``boost`` weight;
+    * for transparent artwork, the exact visible silhouette receives the
+      strongest weight, with a three-pixel inward refinement band so later
+      small primitives smooth the contour rather than spending all remaining
+      budget on low-value interior texture;
+    * fully transparent pixels remain weight 0 and are also a hard geometric
+      rejection boundary in ``score_shape``.
     """
-    h, w = target.shape[:2]
-    lum = (
-        target[:, :, 0].astype(np.float32) * 0.299
-        + target[:, :, 1].astype(np.float32) * 0.587
-        + target[:, :, 2].astype(np.float32) * 0.114
-    )
-    pad = np.pad(lum, 1, mode="edge")
-    gx = (
-        -1.0 * pad[0:h, 0:w]   + 0.0 * pad[0:h, 1:w+1]   + 1.0 * pad[0:h, 2:w+2]
-        + -2.0 * pad[1:h+1, 0:w] + 0.0 * pad[1:h+1, 1:w+1] + 2.0 * pad[1:h+1, 2:w+2]
-        + -1.0 * pad[2:h+2, 0:w] + 0.0 * pad[2:h+2, 1:w+1] + 1.0 * pad[2:h+2, 2:w+2]
-    )
-    gy = (
-        -1.0 * pad[0:h, 0:w]   + -2.0 * pad[0:h, 1:w+1]   + -1.0 * pad[0:h, 2:w+2]
-        + 0.0 * pad[1:h+1, 0:w] + 0.0 * pad[1:h+1, 1:w+1] + 0.0 * pad[1:h+1, 2:w+2]
-        + 1.0 * pad[2:h+2, 0:w] + 2.0 * pad[2:h+2, 1:w+1] + 1.0 * pad[2:h+2, 2:w+2]
-    )
-    mag = np.sqrt(gx * gx + gy * gy)
-    max_mag = float(mag.max())
-    if max_mag < 1e-6:
-        norm = np.ones((h, w), dtype=np.float32)
-    else:
-        norm = 1.0 + (boost - 1.0) * (mag / max_mag).astype(np.float32)
+    gradient = _rgb_gradient_strength(target)
+    weight = 1.0 + (float(boost) - 1.0) * gradient
+
     if alpha_mask is not None:
-        norm = norm * (alpha_mask > 0).astype(np.float32)
-    return norm
+        allowed = alpha_mask > 0
+        weight *= allowed.astype(np.float32)
+
+        boundary = _silhouette_boundary(allowed)
+        if boundary.any():
+            weight[boundary] = np.maximum(weight[boundary], SILHOUETTE_EDGE_BOOST)
+            previous = boundary
+            covered = boundary.copy()
+            for band_boost in SILHOUETTE_INNER_BOOSTS:
+                expanded = _dilate8(previous) & allowed & ~covered
+                if not expanded.any():
+                    break
+                weight[expanded] = np.maximum(weight[expanded], float(band_boost))
+                covered |= expanded
+                previous = expanded
+
+    return weight.astype(np.float32)
 
 
 def rms_error(
@@ -114,19 +184,7 @@ def compute_optimal_color(
 
 
 def _respects_hard_alpha_boundary(mask_local: np.ndarray, region_alpha: np.ndarray) -> bool:
-    """Return True only when every rasterized candidate pixel stays inside source alpha.
-
-    Sticker mode represents a real Forza vinyl group, not a composited bitmap.
-    Forza renders the whole primitive; it cannot clip an ellipse/rectangle to the
-    PNG alpha mask. Therefore any candidate pixel that overlaps a fully
-    transparent source pixel is illegal. We deliberately use ``mask_local > 0``
-    rather than a 50%/128 body threshold so even the candidate's anti-aliased
-    raster footprint must remain inside the source silhouette.
-
-    Partially transparent source-edge pixels are considered part of the source
-    silhouette; only alpha==0 is forbidden. This preserves the original PNG's
-    outer support without inventing an artificial inward threshold.
-    """
+    """True only when every rasterized candidate pixel stays inside source alpha."""
     footprint = mask_local > 0
     if not footprint.any():
         return False
@@ -141,21 +199,22 @@ def composite(
     alpha_mask: np.ndarray | None = None,
     edge_weight: np.ndarray | None = None,
 ) -> tuple[np.ndarray, float]:
-    """Composite shape over current canvas with optimal color. Return (new_canvas, new_rms)."""
+    """Composite one complete primitive exactly as FH6 will render it."""
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
     x0, y0, x1, y1 = bbox
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
-        return current, rms_error(current, target, alpha_mask)
+        return current, rms_error(current, target, alpha_mask, edge_weight)
+
     if alpha_mask is not None:
         region_alpha = alpha_mask[y0:y1, x0:x1]
-        # A committed sticker shape should already have passed the strict
-        # boundary gate in score_shape. Keep the clipping here as a defensive
-        # preview safeguard, but it must never be relied on to make an illegal
-        # candidate appear legal.
-        effective_mask = np.minimum(mask_local, region_alpha)
-    else:
-        effective_mask = mask_local
+        if not _respects_hard_alpha_boundary(mask_local, region_alpha):
+            return current, rms_error(current, target, alpha_mask, edge_weight)
+
+    # Legal sticker primitives are rendered whole by Forza.  Colour fitting
+    # therefore uses the whole legal primitive as well; clipping it by source
+    # alpha here would make the optimiser and preview disagree with injection.
+    effective_mask = mask_local
     color = compute_optimal_color(target, current, effective_mask, bbox, shape.color[3])
     new = current.copy()
     a = color[3] / 255.0
@@ -205,10 +264,10 @@ def score_shape(
 ) -> tuple[float, tuple[int, int, int, int]]:
     """Score a candidate without modifying the working canvas.
 
-    Sticker-mode contract is intentionally absolute: if any rasterized part of
-    the candidate touches an alpha==0 source pixel, return +inf. This makes the
-    transparent boundary a hard geometric constraint rather than a soft score.
-    Slight under-fill is preferred to any protrusion outside the source image.
+    The transparent source silhouette is an absolute geometric constraint.  A
+    legal candidate is then ranked by the replica-importance map, so the same
+    objective applies at every layer count: best possible reconstruction of the
+    source with the budget available.
     """
     h, w = current.shape[:2]
     mask_local, bbox = shape.rasterize_mask(w, h)
@@ -216,13 +275,12 @@ def score_shape(
     if x1 <= x0 or y1 <= y0 or mask_local.size == 0:
         return float("inf"), shape.color
 
-    effective_mask = mask_local
     if alpha_mask is not None:
         region_alpha = alpha_mask[y0:y1, x0:x1]
         if not _respects_hard_alpha_boundary(mask_local, region_alpha):
             return float("inf"), shape.color
-        effective_mask = np.minimum(mask_local, region_alpha)
 
+    effective_mask = mask_local
     color = compute_optimal_color(target, current, effective_mask, bbox, shape.color[3])
     a = color[3] / 255.0
     region_cur = current[y0:y1, x0:x1].astype(np.float32)

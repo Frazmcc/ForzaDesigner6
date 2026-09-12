@@ -14,6 +14,27 @@ from fd6.io.exporter import save_json
 from fd6.io.json_schema import FD6Document
 
 
+def prepare_solid_logo_rgba(rgba: Image.Image, alpha_threshold: int = 128) -> tuple[Image.Image, np.ndarray]:
+    """Convert a transparent logo to a crisp binary silhouette target.
+
+    Forza layers are opaque primitives. PNG anti-alias pixels are commonly
+    stored as dark/grey RGB with partial alpha; reproducing those RGB values as
+    opaque shapes creates a visible grey halo in-game. Solid-logo mode instead
+    uses alpha only to decide membership in the logo:
+
+    - alpha >= threshold -> fully opaque, pure black logo pixel
+    - alpha < threshold  -> fully transparent / forbidden outside space
+
+    The result gives the optimiser a sharp outer contour and a uniform black
+    interior, so any uncovered body pixel remains an obvious high-error hole.
+    """
+    arr = np.asarray(rgba.convert("RGBA"), dtype=np.uint8)
+    threshold = max(1, min(254, int(alpha_threshold)))
+    mask = np.where(arr[:, :, 3] >= threshold, 255, 0).astype(np.uint8)
+    rgb = np.zeros((arr.shape[0], arr.shape[1], 3), dtype=np.uint8)
+    return Image.fromarray(rgb, "RGB"), mask
+
+
 class GenerationWorker(QObject):
     """Wraps Engine.run() in a QThread-friendly object. Emits Qt signals for the GUI."""
 
@@ -65,9 +86,20 @@ class GenerationWorker(QObject):
             img = Image.open(self.image_path)
             alpha_mask: np.ndarray | None = None
             has_alpha = img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info)
+            solid_logo_mode = bool(getattr(self.profile, "solid_logo_mode", False))
+
             if has_alpha:
                 rgba = img.convert("RGBA")
-                if self.sticker_mode:
+                if solid_logo_mode:
+                    # Solid-logo mode always implies sticker semantics: preserve
+                    # transparency, remove PNG anti-alias colours, and solve a
+                    # pure black binary silhouette instead.
+                    img, alpha_mask = prepare_solid_logo_rgba(
+                        rgba,
+                        getattr(self.profile, "solid_logo_alpha_threshold", 128),
+                    )
+                    self.sticker_mode = True
+                elif self.sticker_mode:
                     arr_rgba = np.asarray(rgba, dtype=np.uint8)
                     img = Image.fromarray(arr_rgba[:, :, :3], "RGB")
                     alpha_mask = arr_rgba[:, :, 3].copy()
@@ -103,24 +135,40 @@ class GenerationWorker(QObject):
             img = buffered
 
             # Downscale to profile.max_resolution along the longer side.
-            # RGB gets high-quality LANCZOS resampling, but the sticker alpha
-            # mask is a HARD geometry boundary. LANCZOS can create faint nonzero
-            # halos outside a transparent edge, which would incorrectly make
-            # those pixels legal for Forza primitives. NEAREST preserves the
-            # original alpha support without inventing new non-transparent
-            # pixels around the silhouette.
+            # RGB gets high-quality LANCZOS resampling for normal images. In
+            # solid-logo mode both colour and alpha are binary geometry data, so
+            # NEAREST is used for both to preserve a crisp contour with no grey
+            # resampling halo. The alpha mask is always NEAREST because it is a
+            # hard legal/illegal boundary for Forza primitives.
             mr = self.profile.max_resolution
             if max(img.size) > mr:
                 scale = mr / max(img.size)
                 new_size = (max(1, int(img.size[0] * scale)), max(1, int(img.size[1] * scale)))
-                img = img.resize(new_size, Image.LANCZOS)
+                img = img.resize(new_size, Image.NEAREST if solid_logo_mode else Image.LANCZOS)
                 if alpha_mask is not None:
                     am_img = Image.fromarray(alpha_mask, "L").resize(new_size, Image.NEAREST)
                     alpha_mask = np.asarray(am_img, dtype=np.uint8)
-            target = np.asarray(img, dtype=np.uint8)
+
+            # Reassert binary data after any resize. This guarantees the target
+            # contains no grey anti-alias pixels and the alpha mask contains only
+            # fully legal or fully forbidden pixels.
+            if solid_logo_mode:
+                alpha_mask = np.where(alpha_mask >= 128, 255, 0).astype(np.uint8)
+                target = np.zeros((img.size[1], img.size[0], 3), dtype=np.uint8)
+            else:
+                target = np.asarray(img, dtype=np.uint8)
 
             engine_cls = self._engine_class()
             self._engine = engine_cls(target, EngineConfig(profile=self.profile), alpha_mask=alpha_mask)
+
+            if solid_logo_mode and hasattr(self._engine, "edge_weight"):
+                # Crisp edges remain highest priority, but give every legal body
+                # pixel a stronger floor weight so interior pinholes/gaps are not
+                # sacrificed merely to shave another fraction from the contour.
+                body = alpha_mask > 0
+                ew = self._engine.edge_weight
+                ew[body] = np.maximum(ew[body], 4.0)
+
             stem = self.image_path.stem
             final_path = self.output_dir / f"{stem}.json"
 
@@ -131,6 +179,8 @@ class GenerationWorker(QObject):
                     label = event.message
                     if engine_cls is InlineEngine and "CPU" in label.upper():
                         label += " (safe inline mode)"
+                    if solid_logo_mode:
+                        label += " — Solid Logo"
                     self.backend_ready.emit(label)
                 elif event.kind == "preview" and event.canvas is not None:
                     self.preview.emit(event.canvas)

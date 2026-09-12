@@ -2,24 +2,133 @@ from __future__ import annotations
 
 """Single-process CPU search engine for frozen Windows builds.
 
-PyInstaller one-file builds can be sensitive to spawning ProcessPoolExecutor
-workers.  If worker dispatch is not intercepted correctly, a child process can
-re-enter the application entrypoint and open another FD6 window.  This engine
-keeps exactly the same candidate/scoring/commit pipeline but performs the CPU
-search inside the existing GenerationWorker QThread, so no child Python
-processes are created.
+The packaged Windows app runs generation in an existing QThread and must not
+spawn child Python processes.  This engine therefore performs the CPU search
+inline while keeping the same shape/scoring/commit contract as Engine.
 
-The normal :class:`fd6.shapegen.engine.Engine` remains unchanged and is still
-used for source/development runs where multiprocessing works normally.
+Replica-first policy:
+- every layer budget has the SAME objective: closest possible reconstruction;
+- enabled primitive types compete on fitness instead of receiving fixed quotas;
+- unfinished high-error regions are periodically re-weighted;
+- most random candidates are proposed near pixels that are still wrong instead
+  of wasting the finite search budget uniformly across already-good regions;
+- candidates proposed on strong contours are automatically reduced in size so
+  lettering and silhouette edges receive precise geometry at every layer budget;
+- candidate size shrinks aggressively through the run so the back half refines
+  contours, lettering and small details instead of adding more coarse blocks;
+- a candidate is never allowed to make the true unweighted source RMS worse.
 """
 
+import numpy as np
+
 from fd6.shapegen.engine import Engine
-from fd6.shapegen.scoring import precompute_canvas_error, score_shape
+from fd6.shapegen.scoring import precompute_canvas_error, rms_error, score_shape
 from fd6.shapegen.shapes import Shape, random_shape
 
 
 class InlineEngine(Engine):
-    """Engine variant whose CPU search never creates a ProcessPoolExecutor."""
+    """Replica-first Engine variant that never creates a ProcessPoolExecutor."""
+
+    RESIDUAL_REFRESH_EVERY = 10
+    RESIDUAL_BOOST = 3.0
+
+    # Candidate proposal policy. Fitness still decides which primitive wins;
+    # this only decides where most RANDOM proposals begin. Keeping 25% uniform
+    # proposals preserves exploration and avoids getting trapped in one region.
+    FOCUS_CANDIDATE_FRACTION = 0.75
+    FOCUS_RESIDUAL_POWER = 1.5
+
+    # Strong internal/source contours should receive small, precise candidate
+    # geometry even early in a run. Without this, a focused centre can still be
+    # paired with a large random ellipse/rectangle that spans several colours,
+    # producing chunky lettering and wasting edge-focused samples.
+    DETAIL_EDGE_THRESHOLD = 6.0
+    DETAIL_SHRINK_MIN = 0.28
+    DETAIL_SHRINK_MAX = 0.60
+
+    def _max_size_frac_for_progress(self, progress: float) -> float:
+        """Progressive coarse-to-fine geometry schedule for ANY layer count."""
+        if progress < 0.10:
+            return 0.22
+        if progress < 0.30:
+            return 0.16
+        if progress < 0.55:
+            return 0.10
+        if progress < 0.75:
+            return 0.065
+        if progress < 0.90:
+            return 0.040
+        return 0.025
+
+    def _build_focus_cdf(self) -> tuple[np.ndarray | None, float]:
+        """Build a weighted distribution of pixels that still need correction."""
+        residual = np.abs(
+            self.canvas.astype(np.float32) - self.target.astype(np.float32)
+        ).mean(axis=2) / 255.0
+        residual = np.power(residual, self.FOCUS_RESIDUAL_POWER, dtype=np.float32)
+
+        importance = residual * self.edge_weight.astype(np.float32, copy=False)
+        if self.alpha_mask is not None:
+            importance *= (self.alpha_mask > 0).astype(np.float32)
+
+        flat = importance.reshape(-1).astype(np.float64)
+        total = float(flat.sum())
+        if not np.isfinite(total) or total <= 1e-12:
+            return None, 0.0
+        return np.cumsum(flat), total
+
+    def _shrink_shape_for_detail_hotspot(self, shape: Shape) -> Shape:
+        """Reduce candidate extent when its centre lies on a strong source edge.
+
+        This is proposal guidance only. It does not force a shape to win and it
+        never changes the hard-alpha rule. The goal is to make the random budget
+        contain many genuinely useful small candidates around letter strokes,
+        folds and the transparent silhouette instead of mostly coarse geometry.
+        """
+        if not hasattr(shape, "x") or not hasattr(shape, "y"):
+            return shape
+
+        x = int(round(float(shape.x)))
+        y = int(round(float(shape.y)))
+        x = min(max(x, 0), self.w - 1)
+        y = min(max(y, 0), self.h - 1)
+        local_weight = float(self.edge_weight[y, x])
+        if local_weight < self.DETAIL_EDGE_THRESHOLD:
+            return shape
+
+        factor = self.rng.uniform(self.DETAIL_SHRINK_MIN, self.DETAIL_SHRINK_MAX)
+        for attr in ("rx", "ry", "hw", "hh", "r"):
+            if hasattr(shape, attr):
+                value = float(getattr(shape, attr))
+                setattr(shape, attr, max(1.0, value * factor))
+        return shape
+
+    def _focus_candidate(
+        self,
+        shape: Shape,
+        focus_cdf: np.ndarray | None,
+        focus_total: float,
+    ) -> Shape:
+        """Move a proposal centre onto a still-wrong source region most of the time."""
+        if (
+            focus_cdf is None
+            or focus_total <= 0.0
+            or not hasattr(shape, "x")
+            or not hasattr(shape, "y")
+            or self.rng.random() >= self.FOCUS_CANDIDATE_FRACTION
+        ):
+            return shape
+
+        needle = self.rng.random() * focus_total
+        idx = int(np.searchsorted(focus_cdf, needle, side="left"))
+        idx = min(max(idx, 0), self.w * self.h - 1)
+        y, x = divmod(idx, self.w)
+
+        jitter_x = self.rng.uniform(-2.0, 2.0)
+        jitter_y = self.rng.uniform(-2.0, 2.0)
+        shape.x = max(0.0, min(float(self.w - 1), float(x) + jitter_x))
+        shape.y = max(0.0, min(float(self.h - 1), float(y) + jitter_y))
+        return self._shrink_shape_for_detail_hotspot(shape)
 
     def _parallel_search(
         self,
@@ -28,78 +137,134 @@ class InlineEngine(Engine):
         n_mutate: int,
         max_size_frac: float | None = None,
     ) -> tuple[float, Shape | None]:
-        """Run one full random-search + hill-climb chain in the worker thread.
-
-        One inline chain is intentionally equivalent to one worker's full
-        search in the normal multiprocessing engine.  This avoids multiplying
-        an already expensive Logo Ultra search by the number of CPU cores while
-        providing a reliable fallback for frozen Windows executables.
-        """
+        """Run a fair competitive search across ALL enabled primitive types."""
         n_random = max(1, n_random)
         n_mutate = max(1, n_mutate)
 
-        canvas_full_sq, canvas_norm = precompute_canvas_error(
+        allowed_types = [t for t in getattr(self.profile, "shape_types", []) if t]
+        if not allowed_types:
+            allowed_types = [t for t in types if t] or ["rotated_ellipse"]
+
+        weighted_full_sq, weighted_norm = precompute_canvas_error(
             self.canvas,
             self.target,
             self.alpha_mask,
             self.edge_weight,
         )
+        raw_full_sq, raw_norm = precompute_canvas_error(
+            self.canvas,
+            self.target,
+            self.alpha_mask,
+            None,
+        )
+        current_raw_rms = float(np.sqrt(max(0.0, raw_full_sq) / max(raw_norm, 1.0)))
+
+        focus_cdf, focus_total = self._build_focus_cdf()
 
         best_score = float("inf")
         best_color = None
         best_shape: Shape | None = None
 
-        for _ in range(n_random):
-            shape = random_shape(
-                self.rng,
-                self.w,
-                self.h,
-                types,
-                max_size_frac=max_size_frac,
-            )
-            score, color = score_shape(
-                shape,
-                self.canvas,
-                self.target,
-                self.alpha_mask,
-                canvas_full_sq=canvas_full_sq,
-                canvas_norm=canvas_norm,
-                edge_weight=self.edge_weight,
-            )
-            if score < best_score:
-                best_score = score
-                best_color = color
-                best_shape = shape
+        base_count = n_random // len(allowed_types)
+        remainder = n_random % len(allowed_types)
+
+        for type_index, type_name in enumerate(allowed_types):
+            candidate_count = max(1, base_count + (1 if type_index < remainder else 0))
+            for _ in range(candidate_count):
+                shape = random_shape(
+                    self.rng,
+                    self.w,
+                    self.h,
+                    [type_name],
+                    max_size_frac=max_size_frac,
+                )
+                shape = self._focus_candidate(shape, focus_cdf, focus_total)
+
+                weighted_score, color = score_shape(
+                    shape,
+                    self.canvas,
+                    self.target,
+                    self.alpha_mask,
+                    canvas_full_sq=weighted_full_sq,
+                    canvas_norm=weighted_norm,
+                    edge_weight=self.edge_weight,
+                )
+                if not np.isfinite(weighted_score):
+                    continue
+
+                raw_score, _ = score_shape(
+                    shape,
+                    self.canvas,
+                    self.target,
+                    self.alpha_mask,
+                    canvas_full_sq=raw_full_sq,
+                    canvas_norm=raw_norm,
+                    edge_weight=None,
+                )
+                if raw_score > current_raw_rms + 1e-9:
+                    continue
+
+                if weighted_score < best_score:
+                    best_score = weighted_score
+                    best_color = color
+                    best_shape = shape
 
         if best_shape is None:
             return float("inf"), None
 
         best_shape.color = best_color
         no_improve = 0
-        cap = n_mutate
 
-        for _ in range(cap):
+        for _ in range(n_mutate):
             candidate = best_shape.mutate(self.rng, self.w, self.h)
-            score, color = score_shape(
+            weighted_score, color = score_shape(
                 candidate,
                 self.canvas,
                 self.target,
                 self.alpha_mask,
-                canvas_full_sq=canvas_full_sq,
-                canvas_norm=canvas_norm,
+                canvas_full_sq=weighted_full_sq,
+                canvas_norm=weighted_norm,
                 edge_weight=self.edge_weight,
             )
-            if score < best_score:
-                best_score = score
+            if not np.isfinite(weighted_score):
+                no_improve += 1
+                continue
+
+            raw_score, _ = score_shape(
+                candidate,
+                self.canvas,
+                self.target,
+                self.alpha_mask,
+                canvas_full_sq=raw_full_sq,
+                canvas_norm=raw_norm,
+                edge_weight=None,
+            )
+            if raw_score > current_raw_rms + 1e-9:
+                no_improve += 1
+                if no_improve >= max(30, n_mutate // 3):
+                    break
+                continue
+
+            if weighted_score < best_score:
+                best_score = weighted_score
                 best_color = color
                 best_shape = candidate
                 no_improve = 0
             else:
                 no_improve += 1
-                if no_improve >= max(20, cap // 4):
+                if no_improve >= max(30, n_mutate // 3):
                     break
 
         if best_color is not None:
             best_shape.color = best_color
 
         return best_score, best_shape
+
+    def run(self):
+        """Expose ordinary source RMS in progress/done events."""
+        for event in super().run():
+            if event.kind in {"shape_committed", "preview", "checkpoint", "done"}:
+                true_rms = rms_error(self.canvas, self.target, self.alpha_mask)
+                self.rms = true_rms
+                event.rms = true_rms
+            yield event

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import configparser
-from dataclasses import dataclass, field, asdict
+import os
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -21,10 +22,18 @@ class Profile:
     save_every: int = 100
     stop_at: int = 3000
     shape_types: list[str] = field(default_factory=lambda: ["rotated_ellipse"])
-    # Compute backend for the shape search: "auto" (GPU if a CUDA device + CuPy
-    # are present, else CPU), "cpu" (force the multiprocess CPU path), or "gpu"
-    # (force CuPy; silently falls back to CPU if unavailable or it errors).
     compute_backend: str = "auto"
+    # UI/image handling options are part of the profile too, so imported/saved
+    # INIs reproduce the whole generation setup rather than only search knobs.
+    preserve_transparency: bool = False
+    cap_generation_2048: bool = False
+    # Solid-logo mode converts transparent artwork into a binary silhouette:
+    # visible logo pixels become pure black + fully opaque; pixels below the
+    # alpha threshold become fully transparent. This avoids reproducing PNG
+    # anti-alias fringe as opaque grey Forza shapes and gives the optimiser a
+    # crisp edge plus a uniformly solid interior target.
+    solid_logo_mode: bool = False
+    solid_logo_alpha_threshold: int = 128
 
     def to_ini(self) -> str:
         cp = configparser.ConfigParser()
@@ -43,6 +52,10 @@ class Profile:
             "stopAt": str(self.stop_at),
             "shapeTypes": ",".join(self.shape_types),
             "computeBackend": self.compute_backend,
+            "preserveTransparency": "true" if self.preserve_transparency else "false",
+            "capGeneration2048": "true" if self.cap_generation_2048 else "false",
+            "solidLogoMode": "true" if self.solid_logo_mode else "false",
+            "solidLogoAlphaThreshold": str(self.solid_logo_alpha_threshold),
         }
         from io import StringIO
         buf = StringIO()
@@ -56,6 +69,15 @@ def _parse_int_list(s: str) -> list[int]:
 
 def _parse_str_list(s: str) -> list[str]:
     return [x.strip() for x in s.split(",") if x.strip()]
+
+
+def _parse_bool(value: str, default: bool) -> bool:
+    value = str(value).strip().lower()
+    if value in ("1", "true", "yes", "on"):
+        return True
+    if value in ("0", "false", "no", "off"):
+        return False
+    return default
 
 
 def load_profile(name: str, text: str) -> Profile:
@@ -95,6 +117,20 @@ def load_profile(name: str, text: str) -> Profile:
         p.shape_types = _parse_str_list(section["shapeTypes"])
     backend = getstr("computeBackend", p.compute_backend).lower().strip()
     p.compute_backend = backend if backend in ("auto", "cpu", "gpu") else "auto"
+    p.preserve_transparency = _parse_bool(
+        section.get("preserveTransparency", str(p.preserve_transparency)),
+        p.preserve_transparency,
+    )
+    p.cap_generation_2048 = _parse_bool(
+        section.get("capGeneration2048", str(p.cap_generation_2048)),
+        p.cap_generation_2048,
+    )
+    p.solid_logo_mode = _parse_bool(
+        section.get("solidLogoMode", str(p.solid_logo_mode)),
+        p.solid_logo_mode,
+    )
+    threshold = getint("solidLogoAlphaThreshold", p.solid_logo_alpha_threshold)
+    p.solid_logo_alpha_threshold = max(1, min(254, threshold))
     return p
 
 
@@ -103,8 +139,32 @@ def load_profile_from_file(path: str | Path) -> Profile:
     return load_profile(path.stem, path.read_text(encoding="utf-8"))
 
 
+def bundled_profiles_dir() -> Path:
+    return Path(__file__).resolve().parent.parent / "settings" / "profiles"
+
+
+def user_profiles_dir() -> Path:
+    """Persistent user profile folder that also works from a one-file EXE."""
+    if os.name == "nt":
+        root = Path(os.environ.get("APPDATA", Path.home()))
+        return root / "ForzaDesigner6" / "profiles"
+    return Path.home() / ".forzadesigner6" / "profiles"
+
+
 def list_bundled_profiles() -> list[Path]:
-    base = Path(__file__).resolve().parent.parent / "settings" / "profiles"
+    base = bundled_profiles_dir()
     if not base.exists():
         return []
     return sorted(base.glob("*.ini"))
+
+
+def list_user_profiles() -> list[Path]:
+    base = user_profiles_dir()
+    if not base.exists():
+        return []
+    return sorted(base.glob("*.ini"))
+
+
+def list_available_profiles() -> list[Path]:
+    """Bundled profiles followed by persistent user-imported profiles."""
+    return list_bundled_profiles() + list_user_profiles()

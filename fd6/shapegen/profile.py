@@ -27,6 +27,13 @@ class Profile:
     # INIs reproduce the whole generation setup rather than only search knobs.
     preserve_transparency: bool = False
     cap_generation_2048: bool = False
+    # Solid-logo mode converts transparent artwork into a binary silhouette:
+    # visible logo pixels become pure black + fully opaque; pixels below the
+    # alpha threshold become fully transparent. This avoids reproducing PNG
+    # anti-alias fringe as opaque grey Forza shapes and gives the optimiser a
+    # crisp edge plus a uniformly solid interior target.
+    solid_logo_mode: bool = False
+    solid_logo_alpha_threshold: int = 128
 
     def to_ini(self) -> str:
         cp = configparser.ConfigParser()
@@ -47,6 +54,8 @@ class Profile:
             "computeBackend": self.compute_backend,
             "preserveTransparency": "true" if self.preserve_transparency else "false",
             "capGeneration2048": "true" if self.cap_generation_2048 else "false",
+            "solidLogoMode": "true" if self.solid_logo_mode else "false",
+            "solidLogoAlphaThreshold": str(self.solid_logo_alpha_threshold),
         }
         from io import StringIO
         buf = StringIO()
@@ -116,6 +125,12 @@ def load_profile(name: str, text: str) -> Profile:
         section.get("capGeneration2048", str(p.cap_generation_2048)),
         p.cap_generation_2048,
     )
+    p.solid_logo_mode = _parse_bool(
+        section.get("solidLogoMode", str(p.solid_logo_mode)),
+        p.solid_logo_mode,
+    )
+    threshold = getint("solidLogoAlphaThreshold", p.solid_logo_alpha_threshold)
+    p.solid_logo_alpha_threshold = max(1, min(254, threshold))
     return p
 
 

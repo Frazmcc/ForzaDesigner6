@@ -159,7 +159,11 @@ def test_enabled_shape_types_compete_instead_of_receiving_output_quota(monkeypat
     monkeypatch.setattr(inline_module, "score_shape", fake_score_shape)
 
     engine = InlineEngine.__new__(InlineEngine)
-    engine.canvas = np.zeros((4, 4, 3), dtype=np.uint8)
+    # Keep the current canvas intentionally far from the target so the
+    # replica-first monotonic RMS guard accepts the mocked 1.0/10.0 candidates.
+    # With identical zero canvas/target the current RMS is 0, so every positive
+    # fake score is correctly rejected before type competition can be asserted.
+    engine.canvas = np.full((4, 4, 3), 255, dtype=np.uint8)
     engine.target = np.zeros((4, 4, 3), dtype=np.uint8)
     engine.alpha_mask = None
     engine.edge_weight = np.ones((4, 4), dtype=np.float32)

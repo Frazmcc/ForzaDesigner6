@@ -29,7 +29,7 @@
 1. Download `FD6.exe` from [Releases](https://github.com/tokyubevoxelverse/ForzaDesigner6/releases).
 2. Double-click to run — no installer needed. Windows SmartScreen → "More info" → "Run anyway". If injection fails, right-click → **Run as administrator** (and run the game elevated too).
 
-Source build: Python 3.10+, `pip install -r requirements.txt`. Microsoft Visual C++ Redistributable is normally already installed; if FD6 fails to launch, grab it [here](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+Source build: Python 3.11+, `pip install -r requirements.txt`. Microsoft Visual C++ Redistributable is normally already installed; if FD6 fails to launch, grab it [here](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 ---
 

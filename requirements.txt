@@ -1,9 +1,9 @@
 PySide6>=6.6.0
 numpy>=1.26.0
-Pillow>=10.0.0
-pytest>=8.0.0
+Pillow>=13.0.0
+pytest>=9.0.3
 pyinstaller>=6.5.0
-requests>=2.31.0
+requests>=2.33.0
 pypresence>=4.3.0
 # pyopencl is an OPTIONAL cross-vendor GPU dependency, bundled into the release
 # exe via PyInstaller's --collect-all; the app falls back to CPU without it.
